@@ -1,146 +1,140 @@
-import discord
-from discord import app_commands
-from discord.ext import commands
 import os
+import discord
 import aiohttp
+from discord.ext import commands
 from dotenv import load_dotenv
-import json
 from langdetect import detect
 
 load_dotenv()
+
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-API_URL = "https://router.huggingface.co/v1/chat/completions"
-MODEL_NAME = "deepseek-ai/DeepSeek-V3.2-Exp:novita"
-
 intents = discord.Intents.default()
 intents.message_content = True
+intents.guilds = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-tree = bot.tree
+HF_API_URL = "https://router.huggingface.co/v1/chat/completions"
 
-# In-memory stores
-user_memory = {}  # {user_id: [messages]}
-prefixes = {}      # {guild_id: "hey lazy"}
-auto_reply_channels = set()  # channel IDs
-
-HEADERS = {
-    "Authorization": f"Bearer {HF_TOKEN}"
+headers = {
+    "Authorization": f"Bearer {HF_TOKEN}",
 }
 
-async def query_hf(messages):
-    payload = {
-        "messages": messages,
-        "model": MODEL_NAME,
-    }
+# User memory for context
+user_context = {}
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(API_URL, headers=HEADERS, json=payload) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data["choices"][0]["message"]["content"]
-            else:
-                err = await resp.text()
-                print(f"[ERROR] HuggingFace API status: {resp.status} - {err}")
-                return "⚠️ Lazy.AI is sleepy. Try again later."
+# Default prefix list per user/server
+prefixes = {}
+auto_reply_channels = set()
 
+@bot.event
+async def on_ready():
+    print(f"🧠 LazyAI is online as {bot.user}.")
+
+# --- Utility: Language Detection
 def detect_language(text):
     try:
         return detect(text)
     except:
         return "en"
 
-@bot.event
-async def on_ready():
-    print(f"🧠 Lazy.AI is online as {bot.user}.")
+# --- Utility: Format response
+def clean_response(raw, prompt):
     try:
-        synced = await tree.sync()
-        print(f"[INFO] Synced {len(synced)} slash commands.")
-    except Exception as e:
-        print(f"[ERROR] Command sync failed: {e}")
+        response = raw["choices"][0]["message"]["content"]
+        return response.replace(prompt, "").replace("DeepSeek", "LazyAI").strip()
+    except:
+        return "⚠️ LazyAI couldn’t understand the reply."
 
-@tree.command(name="ask", description="Ask Lazy.AI anything.")
-@app_commands.describe(prompt="Your question or message")
-async def ask(interaction: discord.Interaction, prompt: str):
-    await interaction.response.defer()
-    user_id = str(interaction.user.id)
-    lang = detect_language(prompt)
+# --- Main AI Query
+async def get_lazyai_reply(user_id, prompt):
+    history = user_context.get(user_id, [])
+    history.append({"role": "user", "content": prompt})
 
-    if user_id not in user_memory:
-        user_memory[user_id] = []
+    payload = {
+        "model": "deepseek-ai/DeepSeek-V3.2-Exp:novita",
+        "messages": history[-10:]  # Limit context
+    }
 
-    user_memory[user_id].append({"role": "user", "content": prompt})
+    async with aiohttp.ClientSession() as session:
+        async with session.post(HF_API_URL, headers=headers, json=payload) as resp:
+            if resp.status == 200:
+                raw = await resp.json()
+                reply = clean_response(raw, prompt)
+                user_context[user_id] = history + [{"role": "assistant", "content": reply}]
+                return reply
+            else:
+                error = await resp.text()
+                return f"⚠️ LazyAI is sleepy. Try again later.\n`[ERROR] HuggingFace API status: {resp.status} - {error}`"
 
-    response = await query_hf(user_memory[user_id])
-    user_memory[user_id].append({"role": "assistant", "content": response})
-
-    await interaction.followup.send(f"🧠 {response}")
-
-@tree.command(name="set-prefix", description="Set a custom prefix like 'hey lazy'")
-@app_commands.describe(prefix="Text prefix to trigger the bot")
-async def set_prefix(interaction: discord.Interaction, prefix: str):
-    prefixes[interaction.guild_id] = prefix.lower()
-    await interaction.response.send_message(f"✅ Prefix set to: `{prefix}`")
-
-@tree.command(name="set-autoreply-channel", description="Enable auto-reply in this channel")
-async def set_autoreply(interaction: discord.Interaction):
-    auto_reply_channels.add(interaction.channel_id)
-    await interaction.response.send_message("✅ Auto-reply enabled for this channel.")
-
-@tree.command(name="clear-memory", description="Clear your chat memory with Lazy.AI")
-async def clear_memory(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    user_memory.pop(user_id, None)
-    await interaction.response.send_message("🧠 Memory cleared!")
-
-@tree.command(name="help", description="Show all Lazy.AI commands")
-async def help_cmd(interaction: discord.Interaction):
-    msg = """
-**Lazy.AI Slash Commands**
-> Talk to Lazy.AI, set up your preferences, and more:
-
-`/ask [prompt]` — Ask Lazy.AI anything  
-`/set-prefix [text]` — Set a custom prefix like "hey lazy"  
-`/set-autoreply-channel` — Enable replies in this channel without calling it  
-`/clear-memory` — Forget chat history with you  
-`/help` — Show this message
-"""
-    await interaction.response.send_message(msg)
-
+# --- Handle Messages Automatically
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    guild_id = message.guild.id if message.guild else None
-    channel_id = message.channel.id
-    content = message.content.strip()
-
-    # Auto-reply in channel
-    if channel_id in auto_reply_channels:
-        await handle_message(message)
-        return
-
-    # Prefix-based reply
-    prefix = prefixes.get(guild_id, None)
-    if prefix and content.lower().startswith(prefix.lower()):
-        stripped = content[len(prefix):].strip()
-        await handle_message(message, stripped)
-
-async def handle_message(message, prompt_override=None):
-    prompt = prompt_override if prompt_override else message.content
     user_id = str(message.author.id)
-    lang = detect_language(prompt)
+    channel_id = str(message.channel.id)
 
-    if user_id not in user_memory:
-        user_memory[user_id] = []
+    text = message.content.strip()
+    lang = detect_language(text)
 
-    user_memory[user_id].append({"role": "user", "content": prompt})
+    # Auto-reply channel logic
+    if channel_id in auto_reply_channels or any(text.lower().startswith(p) for p in prefixes.get(channel_id, [])):
+        reply = await get_lazyai_reply(user_id, text)
+        await message.channel.send(reply)
+    else:
+        await bot.process_commands(message)
 
-    response = await query_hf(user_memory[user_id])
-    user_memory[user_id].append({"role": "assistant", "content": response})
+# --- Slash Command: /set-autoreply-channel
+@bot.command(name="set-autoreply-channel")
+async def set_autoreply_channel(ctx):
+    auto_reply_channels.add(str(ctx.channel.id))
+    await ctx.send("✅ LazyAI will now auto-reply in this channel.")
 
-    await message.channel.send(f"🧠 {response}")
+# --- Slash Command: /set-prefix
+@bot.command(name="set-prefix")
+async def set_prefix(ctx, *, prefix: str):
+    cid = str(ctx.channel.id)
+    if cid not in prefixes:
+        prefixes[cid] = []
+    prefixes[cid].append(prefix.lower())
+    await ctx.send(f"✅ LazyAI will now respond to messages starting with: `{prefix}`")
+
+# --- Slash Command: /help
+@bot.command(name="help")
+async def help_command(ctx):
+    help_msg = (
+        "**🧠 LazyAI Command List**\n"
+        "`/set-autoreply-channel` — Let LazyAI auto-reply to any message in this channel.\n"
+        "`/set-prefix <word>` — Let LazyAI respond when a message starts with this prefix.\n"
+        "`!lazy <question>` — Manually ask LazyAI something.\n"
+        "`!ping` — Check if LazyAI is awake.\n"
+        "`/help` — Show this message.\n\n"
+        "LazyAI will remember what you say in this channel and respond naturally, even in Arabic or other languages."
+    )
+    await ctx.send(help_msg)
+
+# --- Ping Test
+@bot.command(name="ping")
+async def ping(ctx):
+    await ctx.send("🏓 Pong! LazyAI is alive.")
+
+# --- Manual Ask
+@bot.command(name="lazy")
+async def lazy(ctx, *, prompt: str):
+    user_id = str(ctx.author.id)
+    await ctx.send("🤔 LazyAI is thinking...")
+    reply = await get_lazyai_reply(user_id, prompt)
+    await ctx.send(reply)
+
+# --- Mention Handler
+@bot.command(name="sayto")
+async def say_to(ctx, user: discord.User, *, message: str):
+    mention = f"<@{user.id}>"
+    reply = await get_lazyai_reply(str(ctx.author.id), message)
+    await ctx.send(f"{mention} 🧠 LazyAI says:\n{reply}")
 
 bot.run(DISCORD_TOKEN)
