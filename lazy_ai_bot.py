@@ -27,7 +27,6 @@ HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
@@ -37,19 +36,21 @@ tree = bot.tree
 user_memory = {}
 prefixes = {}
 auto_reply_channels = set()
+user_personalities = {}
 
 def load_memory():
-    global user_memory, prefixes, auto_reply_channels
+    global user_memory, prefixes, auto_reply_channels, user_personalities
     try:
         with open(MEMORY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         user_memory = data.get("user_memory", {})
         prefixes = data.get("prefixes", {})
         auto_reply_channels = set(data.get("auto_reply_channels", []))
+        user_personalities = data.get("user_personalities", {})
         print("[INFO] Memory loaded successfully.")
     except Exception as e:
         print(f"[WARN] Could not load memory: {e}")
-        user_memory, prefixes = {}, {}
+        user_memory, prefixes, user_personalities = {}, {}, {}
         auto_reply_channels = set()
 
 def save_memory():
@@ -58,13 +59,28 @@ def save_memory():
             json.dump({
                 "user_memory": user_memory,
                 "prefixes": prefixes,
-                "auto_reply_channels": list(auto_reply_channels)
+                "auto_reply_channels": list(auto_reply_channels),
+                "user_personalities": user_personalities
             }, f, ensure_ascii=False, indent=2)
         print("[INFO] Memory saved.")
     except Exception as e:
         print(f"[ERROR] Failed to save memory: {e}")
 
 load_memory()
+
+# ===============================
+# PERSONALITY MODES
+# ===============================
+PERSONALITY_MODES = {
+    "default": "",
+    "professional": "Respond in a professional tone, suitable for workplace or academic settings.",
+    "goofy": "Use a playful, humorous tone with jokes or memes.",
+    "motivational": "Encourage and inspire the user with motivational language.",
+    "academic tutor": "Act like an academic tutor who explains clearly and provides guidance.",
+    "tech nerd": "Talk like a tech-savvy person who loves gadgets and programming.",
+    "rude & honest": "Be blunt and honest, even if it's rude — but not offensive.",
+    "custom": None
+}
 
 # ===============================
 # UTILITIES
@@ -75,12 +91,16 @@ def detect_language(text):
     except:
         return "en"
 
-async def query_hf(messages, lang="en"):
+async def query_hf(messages, lang="en", personality=None):
     system_prompt = {
         "role": "system",
-        "content": f"You are LazyAI, a smart, casual Discord bot. "
-                   f"Always reply in {lang}, and sound natural and conversational."
+        "content": f"You are LazyAI — a smart, casual Discord bot. Always reply in {lang}. "
     }
+    if personality and personality.lower() != "default":
+        p_text = PERSONALITY_MODES.get(personality.lower())
+        if p_text is None:
+            p_text = personality
+        system_prompt["content"] += f"Your tone: {p_text}"
 
     payload = {
         "model": MODEL_NAME,
@@ -91,8 +111,7 @@ async def query_hf(messages, lang="en"):
         async with session.post(API_URL, headers=HEADERS, json=payload) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                content = data["choices"][0]["message"]["content"].replace("DeepSeek", "LazyAI")
-                return content
+                return data["choices"][0]["message"]["content"].replace("DeepSeek", "LazyAI")
             else:
                 err = await resp.text()
                 print(f"[ERROR] query_hf {resp.status}: {err}")
@@ -114,7 +133,8 @@ class LazyAIButtons(View):
         lang = detect_language(self.prompt)
         msgs = user_memory.get(self.user_id, [])
         msgs.append({"role": "user", "content": self.prompt})
-        reply = await query_hf(msgs[-10:], lang)
+        personality = user_personalities.get(self.user_id)
+        reply = await query_hf(msgs[-10:], lang, personality)
         msgs.append({"role": "assistant", "content": reply})
         user_memory[self.user_id] = msgs
         save_memory()
@@ -127,7 +147,7 @@ class LazyAIButtons(View):
         await interaction.message.delete()
 
 # ===============================
-# DISCORD EVENTS
+# EVENTS
 # ===============================
 @bot.event
 async def on_ready():
@@ -147,16 +167,30 @@ async def ask(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer()
     user_id = str(interaction.user.id)
     lang = detect_language(prompt)
+    personality = user_personalities.get(user_id)
 
     if user_id not in user_memory:
         user_memory[user_id] = []
 
     user_memory[user_id].append({"role": "user", "content": prompt})
-    reply = await query_hf(user_memory[user_id][-10:], lang)
+    reply = await query_hf(user_memory[user_id][-10:], lang, personality)
     user_memory[user_id].append({"role": "assistant", "content": reply})
     save_memory()
 
     await interaction.followup.send(f"🧠 {reply}", view=LazyAIButtons(user_id, prompt))
+
+@tree.command(name="change-personality", description="Change LazyAI's response style")
+@app_commands.describe(personality="Choose a style: Default, Professional, Goofy, Motivational, Academic Tutor, Tech Nerd, Rude & Honest, or Custom")
+async def change_personality(interaction: discord.Interaction, personality: str):
+    user_id = str(interaction.user.id)
+    if personality.lower() in PERSONALITY_MODES:
+        user_personalities[user_id] = personality.lower()
+        save_memory()
+        await interaction.response.send_message(f"✅ Personality set to `{personality}`")
+    else:
+        user_personalities[user_id] = personality
+        save_memory()
+        await interaction.response.send_message(f"✅ Custom personality set: `{personality}`")
 
 @tree.command(name="set-prefix", description="Set custom prefix like 'hey lazy'")
 @app_commands.describe(prefix="Text prefix")
@@ -183,8 +217,9 @@ async def help_cmd(interaction: discord.Interaction):
     await interaction.response.send_message("""
 **LazyAI Slash Commands**
 🔹 `/ask` — Ask LazyAI anything  
+🔹 `/change-personality` — Switch tone or style  
 🔹 `/set-prefix` — Set a custom prefix like 'hey lazy'  
-🔹 `/set-autoreply-channel` — Enable auto-reply in this channel  
+🔹 `/set-autoreply-channel` — Enable auto-reply here  
 🔹 `/clear-memory` — Forget chat history  
 🔹 `/help` — Show this message
 """)
@@ -202,12 +237,10 @@ async def on_message(message):
     cid = message.channel.id
     text = message.content.strip()
 
-    # Auto-reply in enabled channels
     if cid in auto_reply_channels:
         await handle_message(message)
         return
 
-    # Prefix trigger
     prefix = prefixes.get(gid)
     if prefix and text.lower().startswith(prefix.lower()):
         stripped = text[len(prefix):].strip()
@@ -217,12 +250,13 @@ async def handle_message(message, prompt_override=None):
     prompt = prompt_override if prompt_override else message.content
     uid = str(message.author.id)
     lang = detect_language(prompt)
+    personality = user_personalities.get(uid)
 
     if uid not in user_memory:
         user_memory[uid] = []
 
     user_memory[uid].append({"role": "user", "content": prompt})
-    reply = await query_hf(user_memory[uid][-10:], lang)
+    reply = await query_hf(user_memory[uid][-10:], lang, personality)
     user_memory[uid].append({"role": "assistant", "content": reply})
     save_memory()
 
@@ -239,11 +273,12 @@ async def ping(ctx):
 async def lazy(ctx, *, prompt: str):
     uid = str(ctx.author.id)
     lang = detect_language(prompt)
+    personality = user_personalities.get(uid)
     await ctx.send("🤔 LazyAI is thinking...")
     if uid not in user_memory:
         user_memory[uid] = []
     user_memory[uid].append({"role": "user", "content": prompt})
-    reply = await query_hf(user_memory[uid][-10:], lang)
+    reply = await query_hf(user_memory[uid][-10:], lang, personality)
     user_memory[uid].append({"role": "assistant", "content": reply})
     save_memory()
     await ctx.send(reply, view=LazyAIButtons(uid, prompt))
@@ -253,10 +288,11 @@ async def say_to(ctx, user: discord.User, *, message: str):
     mention = f"<@{user.id}>"
     uid = str(ctx.author.id)
     lang = detect_language(message)
+    personality = user_personalities.get(uid)
     if uid not in user_memory:
         user_memory[uid] = []
     user_memory[uid].append({"role": "user", "content": message})
-    reply = await query_hf(user_memory[uid][-10:], lang)
+    reply = await query_hf(user_memory[uid][-10:], lang, personality)
     user_memory[uid].append({"role": "assistant", "content": reply})
     save_memory()
     await ctx.send(f"{mention} 🧠 LazyAI says:\n{reply}", view=LazyAIButtons(uid, message))
