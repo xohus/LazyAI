@@ -1,30 +1,25 @@
+# lazy_ai_bot.py
+
 import discord
 from discord import app_commands
 from discord.ext import commands
-import os
-import aiohttp
+import os, aiohttp, io, shutil, json, base64
 from dotenv import load_dotenv
 from langdetect import detect
-import json
-import io
-import shutil
 from discord.ui import View, Button
 
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# ===== Model / API endpoints (you may need to adjust) =====
+# ==== ROUTER MODEL ENDPOINTS ====
 CHAT_URL = "https://router.huggingface.co/v1/chat/completions"
 MODEL_NAME = "deepseek-ai/DeepSeek-V3.2-Exp:novita"
+IMAGE_URL = "https://router.huggingface.co/models/stabilityai/stable-diffusion-2"
+TTS_URL = "https://router.huggingface.co/models/suno/bark"
+SPEECH_TO_TEXT_URL = "https://router.huggingface.co/models/openai/whisper"
 
-IMAGE_URL = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-2"
-TTS_URL = "https://api-inference.huggingface.co/models/suno/bark"
-SPEECH_TO_TEXT_URL = "https://api-inference.huggingface.co/models/openai/whisper-1"
-
-HEADERS = {
-    "Authorization": f"Bearer {HF_TOKEN}"
-}
+HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -32,12 +27,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 MEMORY_FILE = "memory.json"
-
-# In‑memory state loaded from JSON
 user_memory = {}
 prefixes = {}
 auto_reply_channels = set()
-personalities = {}  # {user_id: personality instruction}
+personalities = {}
 
 def load_memory():
     global user_memory, prefixes, auto_reply_channels, personalities
@@ -50,7 +43,7 @@ def load_memory():
         personalities = data.get("personalities", {})
         print("[DEBUG] Memory loaded.")
     except Exception as e:
-        print(f"⚠️ Failed to load memory: {e}")
+        print(f"[ERROR] Memory load failed: {e}")
         user_memory = {}
         prefixes = {}
         auto_reply_channels = set()
@@ -70,9 +63,8 @@ def save_memory():
         shutil.move(tmp, MEMORY_FILE)
         print("[DEBUG] Memory saved.")
     except Exception as e:
-        print(f"⚠️ Failed to save memory: {e}")
+        print(f"[ERROR] Save failed: {e}")
 
-# Load memory on startup
 load_memory()
 
 def detect_language(text):
@@ -82,79 +74,55 @@ def detect_language(text):
         return "en"
 
 async def query_hf(messages):
-    payload = {
-        "model": MODEL_NAME,
-        "messages": messages
-    }
+    payload = {"model": MODEL_NAME, "messages": messages}
     async with aiohttp.ClientSession() as session:
         async with session.post(CHAT_URL, headers=HEADERS, json=payload) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 content = data["choices"][0]["message"]["content"]
-                # Replace model identity
-                content = content.replace("DeepSeek", "LazyAI")
-                return content
+                return content.replace("DeepSeek", "LazyAI")
             else:
                 err = await resp.text()
-                print(f"[ERROR] query_hf status {resp.status}: {err}")
-                return "⚠️ LazyAI is sleepy. Try again later."
+                print(f"[ERROR] query_hf {resp.status}: {err}")
+                return "⚠️ LazyAI is offline or sleepy."
 
 async def generate_image(prompt):
     async with aiohttp.ClientSession() as session:
         async with session.post(IMAGE_URL, headers=HEADERS, json={"inputs": prompt}) as resp:
-            if resp.status == 200:
-                return await resp.read()
-            else:
-                print(f"[ERROR] generate_image status {resp.status}")
-                return None
+            return await resp.read() if resp.status == 200 else None
 
-async def text_to_speech(prompt):
+async def text_to_speech(text):
     async with aiohttp.ClientSession() as session:
-        async with session.post(TTS_URL, headers=HEADERS, json={"inputs": prompt}) as resp:
-            if resp.status == 200:
-                return await resp.read()
-            else:
-                print(f"[ERROR] text_to_speech status {resp.status}")
-                return None
+        async with session.post(TTS_URL, headers=HEADERS, json={"inputs": text}) as resp:
+            return await resp.read() if resp.status == 200 else None
 
 async def speech_to_text(audio_bytes):
+    b64 = base64.b64encode(audio_bytes).decode()
     async with aiohttp.ClientSession() as session:
-        payload = {"inputs": base64.b64encode(audio_bytes).decode()}  # may need adjusting
-        async with session.post(SPEECH_TO_TEXT_URL, headers=HEADERS, json=payload) as resp:
+        async with session.post(SPEECH_TO_TEXT_URL, headers=HEADERS, json={"inputs": b64}) as resp:
             if resp.status == 200:
-                data = await resp.json()
-                text = data.get("text") or ""
-                return text
-            else:
-                print(f"[ERROR] speech_to_text status {resp.status}")
-                return ""
+                return (await resp.json()).get("text", "")
+            return ""
 
-async def web_search(query: str):
+async def web_search(query):
     async with aiohttp.ClientSession() as session:
-        async with session.get("https://api.duckduckgo.com/", params={"q": query, "format": "json", "no_redirect": 1}) as resp:
-            try:
-                data = await resp.json()
-            except:
-                text = await resp.text()
-                print(f"[ERROR] web_search parse JSON: {text}")
-                return "🔍 Couldn't fetch search."
-            return data.get("AbstractText") or "🔍 No summary found."
+        async with session.get("https://api.duckduckgo.com/", params={"q": query, "format": "json"}) as resp:
+            data = await resp.json()
+            return data.get("AbstractText", "🔍 No info found.")
 
-# === Buttons for regenerate & delete ===
 class LazyResponseActions(View):
-    def __init__(self, prompt, user_id, memory_snapshot):
+    def __init__(self, prompt, user_id, snapshot):
         super().__init__(timeout=None)
         self.prompt = prompt
         self.user_id = user_id
-        self.memory_snapshot = memory_snapshot  # copy of messages before reply
+        self.snapshot = snapshot
 
     @discord.ui.button(label="🔄 Regenerate", style=discord.ButtonStyle.primary)
     async def regenerate(self, interaction: discord.Interaction, button: Button):
         if str(interaction.user.id) != self.user_id:
-            return await interaction.response.send_message("❌ You can’t regenerate for someone else.", ephemeral=True)
+            return await interaction.response.send_message("❌ Not your button!", ephemeral=True)
         await interaction.response.defer()
-        # Use snapshot + prompt to regenerate
-        msgs = list(self.memory_snapshot)
+        msgs = list(self.snapshot)
         msgs.append({"role": "user", "content": self.prompt})
         reply = await query_hf(msgs)
         await interaction.followup.send(f"🧠 {reply}", view=LazyResponseActions(self.prompt, self.user_id, msgs))
@@ -162,111 +130,95 @@ class LazyResponseActions(View):
     @discord.ui.button(label="🗑️ Delete", style=discord.ButtonStyle.danger)
     async def delete(self, interaction: discord.Interaction, button: Button):
         if str(interaction.user.id) != self.user_id:
-            return await interaction.response.send_message("❌ You can’t delete this.", ephemeral=True)
+            return await interaction.response.send_message("❌ Not your message.", ephemeral=True)
         await interaction.message.delete()
 
 @bot.event
 async def on_ready():
-    print(f"🧠 LazyAI is online as {bot.user}.")
+    print(f"🧠 LazyAI is online as {bot.user}")
     try:
         synced = await tree.sync()
-        print(f"[DEBUG] Synced {len(synced)} slash commands.")
+        print(f"[DEBUG] Synced {len(synced)} commands.")
     except Exception as e:
-        print(f"[ERROR] Command sync failed: {e}")
+        print(f"[ERROR] Sync failed: {e}")
 
-# --- Slash commands ---
-
-@tree.command(name="ask", description="Ask LazyAI anything.")
-@app_commands.describe(prompt="Your question")
-async def slash_ask(interaction: discord.Interaction, prompt: str):
+@tree.command(name="ask", description="Ask LazyAI anything")
+@app_commands.describe(prompt="What do you want to ask?")
+async def ask(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer()
     uid = str(interaction.user.id)
-    if uid not in user_memory:
-        user_memory[uid] = []
-    # Add system message if user has personality
-    msgs = []
+    user_memory.setdefault(uid, [])
     personality = personalities.get(uid)
+    messages = []
     if personality:
-        msgs.append({"role": "system", "content": f"Adopt this personality: {personality}"})
-    msgs.extend(user_memory[uid][-10:])
-    msgs.append({"role": "user", "content": prompt})
-
-    reply = await query_hf(msgs)
-    user_memory[uid].append({"role": "user", "content": prompt})
-    user_memory[uid].append({"role": "assistant", "content": reply})
+        messages.append({"role": "system", "content": f"Adopt this personality: {personality}"})
+    messages += user_memory[uid][-10:] + [{"role": "user", "content": prompt}]
+    reply = await query_hf(messages)
+    user_memory[uid].extend([{"role": "user", "content": prompt}, {"role": "assistant", "content": reply}])
     save_memory()
+    await interaction.followup.send(f"🧠 {reply}", view=LazyResponseActions(prompt, uid, messages))
 
-    await interaction.followup.send(f"🧠 {reply}", view=LazyResponseActions(prompt, uid, msgs))
-
-@tree.command(name="image", description="Generate image from text")
-@app_commands.describe(prompt="Describe the image")
-async def slash_image(interaction: discord.Interaction, prompt: str):
+@tree.command(name="image", description="Generate an image")
+async def image(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer()
     img = await generate_image(prompt)
     if img:
         await interaction.followup.send(file=discord.File(io.BytesIO(img), filename="lazy_image.png"))
     else:
-        await interaction.followup.send("⚠️ Image generation failed.")
+        await interaction.followup.send("⚠️ Failed to generate image.")
 
-@tree.command(name="say", description="Convert text to voice")
-@app_commands.describe(text="What should LazyAI say?")
-async def slash_say(interaction: discord.Interaction, text: str):
+@tree.command(name="say", description="Convert text to speech")
+async def say(interaction: discord.Interaction, text: str):
     await interaction.response.defer()
     audio = await text_to_speech(text)
     if audio:
         await interaction.followup.send(file=discord.File(io.BytesIO(audio), filename="lazy_voice.wav"))
     else:
-        await interaction.followup.send("⚠️ Voice generation failed.")
+        await interaction.followup.send("⚠️ Failed to speak.")
 
-@tree.command(name="search", description="Web search result")
-@app_commands.describe(query="Search this")
-async def slash_search(interaction: discord.Interaction, query: str):
+@tree.command(name="search", description="Search the web")
+async def search(interaction: discord.Interaction, query: str):
     await interaction.response.defer()
     result = await web_search(query)
     await interaction.followup.send(f"🔍 {result}")
 
-@tree.command(name="set-prefix", description="Set a custom prefix")
-@app_commands.describe(prefix="Trigger prefix, e.g. 'hey lazy'")
-async def slash_set_prefix(interaction: discord.Interaction, prefix: str):
-    prefixes[interaction.guild_id] = prefix.lower()
+@tree.command(name="set-prefix", description="Set custom prefix")
+async def set_prefix(interaction: discord.Interaction, prefix: str):
+    prefixes[interaction.guild_id] = prefix
     save_memory()
     await interaction.response.send_message(f"✅ Prefix set to `{prefix}`")
 
-@tree.command(name="set-autoreply-channel", description="Enable auto reply in this channel")
-async def slash_auto(interaction: discord.Interaction):
+@tree.command(name="set-autoreply-channel", description="Enable replies in this channel")
+async def set_channel(interaction: discord.Interaction):
     auto_reply_channels.add(interaction.channel_id)
     save_memory()
-    await interaction.response.send_message("✅ Auto-reply enabled.")
+    await interaction.response.send_message("✅ Auto replies enabled.")
 
-@tree.command(name="clear-memory", description="Clear your memory")
-async def slash_clear(interaction: discord.Interaction):
-    uid = str(interaction.user.id)
-    user_memory.pop(uid, None)
+@tree.command(name="clear-memory", description="Forget chat history")
+async def clear(interaction: discord.Interaction):
+    user_memory.pop(str(interaction.user.id), None)
     save_memory()
-    await interaction.response.send_message("🧠 Memory cleared!")
+    await interaction.response.send_message("🧠 Memory cleared.")
 
-@tree.command(name="change-personality", description="Change how LazyAI speaks to you")
-@app_commands.describe(personality="Describe the personality you want")
-async def slash_personality(interaction: discord.Interaction, personality: str):
-    uid = str(interaction.user.id)
-    personalities[uid] = personality
+@tree.command(name="change-personality", description="Change bot's style")
+async def change(interaction: discord.Interaction, personality: str):
+    personalities[str(interaction.user.id)] = personality
     save_memory()
-    await interaction.response.send_message(f"✅ Personality set: *{personality}*")
+    await interaction.response.send_message(f"✅ Personality set to: {personality}")
 
-@tree.command(name="help", description="Show commands")
-async def slash_help(interaction: discord.Interaction):
+@tree.command(name="help", description="Show command list")
+async def help_cmd(interaction: discord.Interaction):
     await interaction.response.send_message("""
 **LazyAI Commands**
-
-/ask — Ask LazyAI  
-/image — Generate image  
-/say — Convert text to speech  
-/search — Web search  
-/set-prefix — Custom prefix  
-/set-autoreply-channel — Enable auto replies in this channel  
-/clear-memory — Forget chat history  
-/change-personality — Set how I talk to you  
-/help — This message  
+/ask – Ask anything  
+/image – Text to image  
+/say – Text to speech  
+/search – Web search  
+/set-prefix – Custom trigger  
+/set-autoreply-channel – Auto-reply here  
+/clear-memory – Reset your chat  
+/change-personality – Set how I talk to you  
+/help – This message  
 """)
 
 @bot.event
@@ -276,51 +228,41 @@ async def on_message(message):
 
     uid = str(message.author.id)
     content = message.content.strip()
-    gid = message.guild.id if message.guild else None
     cid = message.channel.id
+    gid = message.guild.id if message.guild else None
 
-    # Detect audio attachments
-    if message.attachments:
-        for att in message.attachments:
-            if att.content_type and att.content_type.startswith("audio"):
-                audio_bytes = await att.read()
-                text = await speech_to_text(audio_bytes)
-                if text:
-                    print(f"[DEBUG] Got speech input: {text}")
-                    await handle_message(message, prompt_override=text)
-                    return
+    # Handle audio attachments
+    for att in message.attachments:
+        if att.content_type and att.content_type.startswith("audio"):
+            audio_bytes = await att.read()
+            text = await speech_to_text(audio_bytes)
+            if text:
+                return await handle_prompt(message, text)
 
-    # Auto-reply in channel
+    # Channel auto-reply
     if cid in auto_reply_channels:
-        await handle_message(message)
-        return
+        return await handle_prompt(message)
 
-    # Prefix-based trigger
+    # Prefix-based reply
     prefix = prefixes.get(gid)
     if prefix and content.lower().startswith(prefix.lower()):
-        stripped = content[len(prefix):].strip()
-        await handle_message(message, prompt_override=stripped)
+        return await handle_prompt(message, content[len(prefix):].strip())
 
-async def handle_message(message, prompt_override=None):
-    prompt = prompt_override if prompt_override else message.content
+async def handle_prompt(message, prompt_override=None):
     uid = str(message.author.id)
-    msgs = []
+    prompt = prompt_override or message.content
     personality = personalities.get(uid)
+    messages = []
     if personality:
-        msgs.append({"role": "system", "content": f"Adopt this personality: {personality}"})
-    msgs.extend(user_memory.get(uid, [])[-10:])
-    msgs.append({"role": "user", "content": prompt})
+        messages.append({"role": "system", "content": f"Adopt this personality: {personality}"})
+    messages += user_memory.get(uid, [])[-10:] + [{"role": "user", "content": prompt}]
+    reply = await query_hf(messages)
 
-    reply = await query_hf(msgs)
-
-    # Save memory
-    if uid not in user_memory:
-        user_memory[uid] = []
-    user_memory[uid].append({"role": "user", "content": prompt})
-    user_memory[uid].append({"role": "assistant", "content": reply})
+    user_memory.setdefault(uid, []).extend([
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": reply}
+    ])
     save_memory()
-
-    sent = await message.channel.send(f"🧠 {reply}", view=LazyResponseActions(prompt, uid, msgs))
-    return sent
+    await message.channel.send(f"🧠 {reply}", view=LazyResponseActions(prompt, uid, messages))
 
 bot.run(DISCORD_TOKEN)
