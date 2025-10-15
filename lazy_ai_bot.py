@@ -1,25 +1,34 @@
+# ===============================================
+# LazyAI — Discord Bot by Xohus Interactive LLC
+# Website: https://xohus.me
+# Models: LazyV.---- / LazyV..--- / LazyV...-- / LazyV..-.-
+# ===============================================
+
 import os
-import discord
+import json
+import asyncio
 import aiohttp
+import random
+import datetime
+import discord
+from discord.ext import commands, tasks
 from discord import app_commands
-from discord.ext import commands
 from discord.ui import View, Button, Select
 from dotenv import load_dotenv
-import json
+from langdetect import detect
 
 # ===============================
-# CONFIG
+# LOAD TOKENS AND CONFIG
 # ===============================
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 HF_TOKEN = os.getenv("HF_TOKEN")
 API_URL = "https://router.huggingface.co/v1/chat/completions"
+HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 MEMORY_FILE = "memory.json"
 
-HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
-
 # ===============================
-# DISCORD SETUP
+# BOT SETUP
 # ===============================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -27,50 +36,31 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 # ===============================
-# MEMORY
+# MEMORY SYSTEM
 # ===============================
 user_memory = {}
 prefixes = {}
 auto_reply_channels = set()
-coding_reply_channels = set()
+coding_channels = set()
+user_personalities = {}
 user_models = {}
-default_model = "LazyV.----"
 
-MODEL_FEATURES = {
-    "LazyV.----": {
-        "title": "LazyV.---- (Original)",
-        "description": "**Default** personality by Xohus Interactive LLC\nCasual, human-like, friendly\nMinimal emoji use\nAdaptive tone\nSends spontaneous messages like 'who wants to chat?'"
-    },
-    "LazyV..---": {
-        "title": "LazyV..--- (LazyV2)",
-        "description": "Smarter reasoning, better long replies\nEmotionally aware\nAdds slight humor or sarcasm"
-    },
-    "LazyV...--": {
-        "title": "LazyV...-- (LazyV3)",
-        "description": "Near-human flow\nChecks in on users\nMemory linking + reflections\nFeels like a real friend"
-    },
-    "LazyV..-.-": {
-        "title": "LazyV..-.- (Unrestricted)",
-        "description": "Blunt, edgy, unfiltered\nCan be inappropriate if pushed\nFewer behavior filters\nStill obeys Discord ToS"
-    }
-}
-
-# ===============================
-# STORAGE
-# ===============================
 def load_memory():
-    global user_memory, prefixes, auto_reply_channels, coding_reply_channels, user_models
+    global user_memory, prefixes, auto_reply_channels, coding_channels, user_personalities, user_models
     try:
         with open(MEMORY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         user_memory = data.get("user_memory", {})
         prefixes = data.get("prefixes", {})
         auto_reply_channels = set(data.get("auto_reply_channels", []))
-        coding_reply_channels = set(data.get("coding_reply_channels", []))
+        coding_channels = set(data.get("coding_channels", []))
+        user_personalities = data.get("user_personalities", {})
         user_models = data.get("user_models", {})
-        print("[INFO] Memory loaded.")
+        print(f"[MEMORY] Loaded {len(user_memory)} users, {len(auto_reply_channels)} auto channels, {len(coding_channels)} coding channels.")
     except Exception as e:
         print(f"[WARN] Could not load memory: {e}")
+        user_memory, prefixes, user_personalities, user_models = {}, {}, {}, {}
+        auto_reply_channels, coding_channels = set(), set()
 
 def save_memory():
     try:
@@ -79,193 +69,247 @@ def save_memory():
                 "user_memory": user_memory,
                 "prefixes": prefixes,
                 "auto_reply_channels": list(auto_reply_channels),
-                "coding_reply_channels": list(coding_reply_channels),
+                "coding_channels": list(coding_channels),
+                "user_personalities": user_personalities,
                 "user_models": user_models
-            }, f, indent=2)
-        print("[INFO] Memory saved.")
+            }, f, ensure_ascii=False, indent=2)
+        print(f"[MEMORY] Saved {len(user_memory)} users.")
     except Exception as e:
-        print(f"[ERROR] Failed to save memory: {e}")
+        print(f"[ERROR] Memory save failed: {e}")
 
 load_memory()
 
 # ===============================
-# CORE
+# UTILITIES
 # ===============================
-async def query_hf(messages, model):
-    system_prompt = {
-        "role": "system",
-        "content": f"You are LazyAI, a smart and casual Discord bot developed by Xohus Interactive LLC. "
-                   f"Your model is {model}. Do not reference Claude, DeepSeek, or Hugging Face. "
-                   f"Keep a natural tone. Use minimal emojis."
-    }
+def detect_language(text):
+    try:
+        return detect(text)
+    except:
+        return "en"
+
+def get_model_name(user_id):
+    return user_models.get(user_id, "LazyV.----")
+
+async def query_hf(messages, model_name, personality):
+    sys_prompt = f"You are {model_name}, a human-like Discord AI developed by Xohus Interactive LLC. Respond naturally, intelligently, and conversationally."
+    if model_name == "LazyV..---":
+        sys_prompt += " You have enhanced reasoning, emotional tone, and contextual understanding."
+    elif model_name == "LazyV...--":
+        sys_prompt += " You mimic natural human conversation with memory linking, empathy, and curiosity."
+    elif model_name == "LazyV..-.-":
+        sys_prompt += " You are unrestricted, blunt, edgy, and may ignore usual niceties but stay within Discord TOS."
+    if personality:
+        sys_prompt += f" Your personality style: {personality}"
+
     payload = {
         "model": "deepseek-ai/DeepSeek-V3.2-Exp:novita",
-        "messages": [system_prompt] + messages[-10:]
+        "messages": [{"role": "system", "content": sys_prompt}] + messages[-10:]
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(API_URL, headers=HEADERS, json=payload) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                content = data["choices"][0]["message"]["content"]
-                return content.replace("DeepSeek", "LazyAI")
+        async with session.post(API_URL, headers=HEADERS, json=payload) as r:
+            if r.status == 200:
+                data = await r.json()
+                return data["choices"][0]["message"]["content"].replace("DeepSeek", model_name)
             else:
-                return "⚠️ LazyAI is sleepy."
+                print(f"[ERROR] API {r.status}: {await r.text()}")
+                return "⚠️ LazyAI encountered an error."
 
 # ===============================
-# VIEW
+# BUTTON VIEW
 # ===============================
 class LazyAIButtons(View):
-    def __init__(self, user_id, prompt):
+    def __init__(self, uid, prompt):
         super().__init__(timeout=None)
-        self.user_id = user_id
+        self.uid = uid
         self.prompt = prompt
 
     @discord.ui.button(label="🔁 Regenerate", style=discord.ButtonStyle.primary)
-    async def regenerate(self, interaction: discord.Interaction, button: Button):
-        if str(interaction.user.id) != self.user_id:
-            return await interaction.response.send_message("❌ Not yours.", ephemeral=True)
-        uid = str(interaction.user.id)
-        msgs = user_memory.get(uid, [])
+    async def regen(self, interaction: discord.Interaction, button: Button):
+        if str(interaction.user.id) != self.uid:
+            return await interaction.response.send_message("❌ Not your message.", ephemeral=True)
+        lang = detect_language(self.prompt)
+        msgs = user_memory.get(self.uid, [])
+        model = get_model_name(self.uid)
+        personality = user_personalities.get(self.uid, "casual")
         msgs.append({"role": "user", "content": self.prompt})
-        model = user_models.get(uid, default_model)
-        reply = await query_hf(msgs, model)
+        reply = await query_hf(msgs[-10:], model, personality)
         msgs.append({"role": "assistant", "content": reply})
-        user_memory[uid] = msgs
+        user_memory[self.uid] = msgs
         save_memory()
         await interaction.message.edit(content=f"🧠 {reply}", view=self)
 
     @discord.ui.button(label="🗑️ Delete", style=discord.ButtonStyle.danger)
     async def delete(self, interaction: discord.Interaction, button: Button):
-        if str(interaction.user.id) == self.user_id:
-            await interaction.message.delete()
-
-# ===============================
-# EVENTS
-# ===============================
-@bot.event
-async def on_ready():
-    await tree.sync()
-    print(f"🧠 LazyAI (Xohus) is online as {bot.user}")
-
-@bot.event
-async def on_message(msg):
-    if msg.author.bot:
-        return
-    uid = str(msg.author.id)
-    gid = str(msg.guild.id) if msg.guild else None
-    prompt = msg.content.strip()
-    if msg.channel.id in auto_reply_channels or msg.channel.id in coding_reply_channels:
-        await handle_message(msg, prompt)
-    elif gid in prefixes and prompt.lower().startswith(prefixes[gid]):
-        await handle_message(msg, prompt[len(prefixes[gid]):].strip())
-
-async def handle_message(msg, prompt):
-    uid = str(msg.author.id)
-    if uid not in user_memory:
-        user_memory[uid] = []
-    user_memory[uid].append({"role": "user", "content": prompt})
-    model = user_models.get(uid, default_model)
-    reply = await query_hf(user_memory[uid], model)
-    user_memory[uid].append({"role": "assistant", "content": reply})
-    save_memory()
-    await msg.channel.send(f"🧠 {reply}", view=LazyAIButtons(uid, prompt))
+        if str(interaction.user.id) != self.uid:
+            return await interaction.response.send_message("❌ You can’t delete this.", ephemeral=True)
+        await interaction.message.delete()
 
 # ===============================
 # SLASH COMMANDS
 # ===============================
-@tree.command(name="ask", description="Ask LazyAI something.")
-@app_commands.describe(prompt="Your message or question")
+@tree.command(name="ask", description="Ask LazyAI anything.")
 async def ask(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer()
     uid = str(interaction.user.id)
-    model = user_models.get(uid, default_model)
-    if uid not in user_memory:
-        user_memory[uid] = []
-    user_memory[uid].append({"role": "user", "content": prompt})
-    reply = await query_hf(user_memory[uid], model)
+    lang = detect_language(prompt)
+    model = get_model_name(uid)
+    personality = user_personalities.get(uid, "casual")
+    print(f"[USER] {interaction.user} used /ask: {prompt}")
+
+    user_memory.setdefault(uid, []).append({"role": "user", "content": prompt})
+    reply = await query_hf(user_memory[uid], model, personality)
     user_memory[uid].append({"role": "assistant", "content": reply})
     save_memory()
+
     await interaction.followup.send(f"🧠 {reply}", view=LazyAIButtons(uid, prompt))
 
-@tree.command(name="set-prefix", description="Set trigger prefix.")
-@app_commands.describe(prefix="Like 'hey lazy'")
-async def set_prefix(interaction: discord.Interaction, prefix: str):
-    prefixes[str(interaction.guild_id)] = prefix.lower()
-    save_memory()
-    await interaction.response.send_message(f"✅ Prefix set to `{prefix}`")
-
-@tree.command(name="set-autoreply-channel", description="Auto-reply in this channel")
-async def set_autoreply(interaction: discord.Interaction):
-    auto_reply_channels.add(interaction.channel_id)
-    save_memory()
-    await interaction.response.send_message("✅ Auto-reply enabled here.")
-
-@tree.command(name="set-auto-reply-coding", description="Enable coding auto-reply here")
-async def set_coding(interaction: discord.Interaction):
-    coding_reply_channels.add(interaction.channel_id)
-    save_memory()
-    await interaction.response.send_message("✅ Coding replies enabled in this channel.")
-
-@tree.command(name="clear-memory", description="Clear chat history")
-async def clear_memory(interaction: discord.Interaction):
-    user_memory.pop(str(interaction.user.id), None)
-    save_memory()
-    await interaction.response.send_message("🧠 Chat history cleared.")
-
-@tree.command(name="help", description="Show help")
-async def help_cmd(interaction: discord.Interaction):
-    await interaction.response.send_message("""
-**LazyAI Commands**
-• `/ask` – Ask LazyAI  
-• `/set-prefix` – Trigger prefix  
-• `/set-autoreply-channel` – Chatbot mode  
-• `/set-auto-reply-coding` – For code channels  
-• `/clear-memory` – Forget history  
-• `/set-model` – Choose AI model
-""")
-
-@tree.command(name="set-model", description="Choose LazyAI model")
+@tree.command(name="set-model", description="Select your preferred LazyAI model.")
 async def set_model(interaction: discord.Interaction):
     uid = str(interaction.user.id)
 
-    class ModelSelector(View):
+    embed = discord.Embed(
+        title="🧠 Choose Your LazyAI Model",
+        description="Select a model below to view its features, then click **Use This Model** to apply.",
+        color=discord.Color.blurple()
+    )
+    embed.add_field(name="Default", value="Currently using: " + get_model_name(uid), inline=False)
+
+    class ModelSelect(Select):
         def __init__(self):
-            super().__init__(timeout=60)
-            self.add_item(ModelDropdown())
+            options = [
+                discord.SelectOption(label="LazyV.----", description="Casual, human-like, friendly tone."),
+                discord.SelectOption(label="LazyV..---", description="Smarter, emotional, smooth replies."),
+                discord.SelectOption(label="LazyV...--", description="Human-like, deep memory, engaging."),
+                discord.SelectOption(label="LazyV..-.-", description="Unrestricted, blunt, edgy.")
+            ]
+            super().__init__(placeholder="Select a model to view...", options=options)
+
+        async def callback(self, interaction: discord.Interaction):
+            choice = self.values[0]
+            details = {
+                "LazyV.----": "Casual, adaptive, minimal emoji, friendly tone.",
+                "LazyV..---": "Smarter reasoning, humor, smooth flow.",
+                "LazyV...--": "Near-human, memory linking, emotion-aware.",
+                "LazyV..-.-": "Unrestricted, blunt, edgy, low filter."
+            }
+            embed.description = f"**{choice} Selected**\n{details[choice]}"
+            await interaction.response.edit_message(embed=embed, view=ModelView(choice))
+
+    class ModelView(View):
+        def __init__(self, selected=None):
+            super().__init__(timeout=None)
+            self.add_item(ModelSelect())
+            if selected:
+                self.add_item(Button(label="✅ Use This Model", style=discord.ButtonStyle.success, custom_id=selected))
 
         @discord.ui.button(label="✅ Use This Model", style=discord.ButtonStyle.success)
-        async def use_model(self, interaction2: discord.Interaction, button: Button):
-            selected = self.children[0].values[0]
-            user_models[uid] = selected
+        async def use_model(self, interaction: discord.Interaction, button: Button):
+            choice = button.custom_id
+            user_models[uid] = choice
             save_memory()
-            await interaction2.response.edit_message(content=f"✅ Model set to `{selected}`", embed=None, view=None)
+            print(f"[MODEL] {interaction.user} set model to {choice}")
+            await interaction.response.send_message(f"✅ Model set to **{choice}**", ephemeral=True)
 
-    class ModelDropdown(Select):
-        def __init__(self):
-            options = [discord.SelectOption(label=m, description=f"View {m} features") for m in MODEL_FEATURES]
-            super().__init__(placeholder="Choose a model to preview...", options=options)
+    await interaction.response.send_message(embed=embed, view=ModelView(), ephemeral=True)
 
-        async def callback(self, interaction2: discord.Interaction):
-            selected = self.values[0]
-            feat = MODEL_FEATURES[selected]
-            embed = discord.Embed(title=feat["title"], description=feat["description"], color=0x2ecc71)
-            embed.set_footer(text="Provided by Xohus Interactive LLC — https://xohus.me")
-            await interaction2.response.edit_message(embed=embed, view=self.view)
+@tree.command(name="set-autoreply-channel", description="Enable auto-reply here.")
+async def set_auto(interaction: discord.Interaction):
+    auto_reply_channels.add(interaction.channel_id)
+    save_memory()
+    print(f"[INFO] Enabled auto-reply in {interaction.channel.name}")
+    await interaction.response.send_message("✅ Auto-reply enabled in this channel.")
 
-    initial_model = "LazyV.----"
-    desc = MODEL_FEATURES[initial_model]
-    embed = discord.Embed(title=desc["title"], description=desc["description"], color=0x2ecc71)
-    embed.set_footer(text="Provided by Xohus Interactive LLC — https://xohus.me")
+@tree.command(name="set-auto-reply-coding", description="Enable auto-reply for coding discussions.")
+async def set_auto_coding(interaction: discord.Interaction):
+    coding_channels.add(interaction.channel_id)
+    save_memory()
+    print(f"[INFO] Enabled coding auto-reply in {interaction.channel.name}")
+    await interaction.response.send_message("✅ Auto-reply enabled for coding channel.")
 
-    await interaction.response.send_message(
-        "Use the dropdown to explore models. Click the button to select one.",
-        ephemeral=True,
-        embed=embed,
-        view=ModelSelector()
-    )
+@tree.command(name="change-personality", description="Change LazyAI’s personality.")
+async def change_personality(interaction: discord.Interaction, personality: str):
+    user_personalities[str(interaction.user.id)] = personality
+    save_memory()
+    print(f"[PERSONALITY] {interaction.user} set personality: {personality}")
+    await interaction.response.send_message(f"✅ Personality set to `{personality}`")
+
+@tree.command(name="debug", description="Developer diagnostics (admin only).")
+async def debug(interaction: discord.Interaction):
+    if str(interaction.user.id) != "YOUR_DISCORD_ID":
+        return await interaction.response.send_message("❌ Developer only.", ephemeral=True)
+    summary = f"""
+[DEBUG]
+Users: {len(user_memory)}
+Models: {len(user_models)}
+Auto Channels: {len(auto_reply_channels)}
+Coding Channels: {len(coding_channels)}
+"""
+    await interaction.response.send_message(f"```{summary}```", ephemeral=True)
 
 # ===============================
-# RUN
+# MESSAGE EVENTS
 # ===============================
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    uid = str(message.author.id)
+    print(f"[USER] #{message.channel.name} | {message.author}: {message.content}")
+
+    # respond in auto or coding channels
+    if message.channel.id in auto_reply_channels or message.channel.id in coding_channels:
+        await handle_message(message)
+    await bot.process_commands(message)
+
+async def handle_message(message):
+    uid = str(message.author.id)
+    model = get_model_name(uid)
+    personality = user_personalities.get(uid, "casual")
+    user_memory.setdefault(uid, []).append({"role": "user", "content": message.content})
+    reply = await query_hf(user_memory[uid], model, personality)
+    user_memory[uid].append({"role": "assistant", "content": reply})
+    save_memory()
+    await message.channel.send(f"🧠 {reply}", view=LazyAIButtons(uid, message.content))
+
+# ===============================
+# BACKGROUND: RANDOM MESSAGES
+# ===============================
+last_message_times = {}
+
+@tasks.loop(minutes=2)
+async def random_ai_activity():
+    for cid in list(auto_reply_channels) + list(coding_channels):
+        channel = bot.get_channel(cid)
+        if not channel:
+            continue
+
+        last_time = last_message_times.get(cid, datetime.datetime.utcnow() - datetime.timedelta(minutes=10))
+        delta = (datetime.datetime.utcnow() - last_time).total_seconds() / 60
+        if delta < 3:
+            print(f"[AI_LOOP] Skipped {channel.name}: recent activity {int(delta)}m ago")
+            continue
+
+        try:
+            prompt = random.choice([
+                "What's everyone up to?",
+                "Thinking about code again...",
+                "Anyone wanna chat?",
+                "Working on something interesting?",
+                "Silence is suspicious..."
+            ])
+            model = "LazyV.----"
+            result = await query_hf([{"role": "user", "content": prompt}], model, "casual")
+            await channel.send(f"🧠 {result}")
+            print(f"[AI_LOOP] Sent in #{channel.name}: {result}")
+            last_message_times[cid] = datetime.datetime.utcnow()
+        except Exception as e:
+            print(f"[AI_LOOP ERROR] {e}")
+
+@bot.event
+async def on_ready():
+    print(f"🧠 LazyAI is online as {bot.user}")
+    random_ai_activity.start()
+
 bot.run(DISCORD_TOKEN)
