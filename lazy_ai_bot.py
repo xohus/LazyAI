@@ -6,10 +6,13 @@ import os
 import json
 import aiohttp
 import datetime
+import asyncio
+import pytz
+import re
 import discord
 from discord.ext import commands
 from discord import app_commands
-from discord.ui import View, Button, Select
+from discord.ui import View, Select
 from dotenv import load_dotenv
 
 # ---------------------------
@@ -24,8 +27,10 @@ HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 MEMORY_FILE = "memory.json"
 ADULT_MEMORY_FILE = "18mem.json"
 
-# OWNER ID
 OWNER_ID = 1012774928841445426
+TARGET_USER_ID = 1382832842446340157
+
+SA_TZ = pytz.timezone("Asia/Riyadh")
 
 # ---------------------------
 # DISCORD CLIENT
@@ -33,6 +38,7 @@ OWNER_ID = 1012774928841445426
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
@@ -54,7 +60,6 @@ whatsapp_users = {}
 # ---------------------------
 # MEMORY LOAD/SAVE
 # ---------------------------
-
 def load_memory():
     global user_memory, prefixes, auto_reply_channels, coding_channels
     global adult_channels, user_personalities, user_models
@@ -75,15 +80,15 @@ def load_memory():
         whatsapp_users = data.get("whatsapp_users", {})
 
     except:
-        user_memory = {}
-        prefixes = {}
-        auto_reply_channels = set()
-        coding_channels = set()
-        adult_channels = set()
-        user_personalities = {}
-        user_models = {}
-        linked_accounts = {}
-        whatsapp_users = {}
+        user_memory.clear()
+        prefixes.clear()
+        auto_reply_channels.clear()
+        coding_channels.clear()
+        adult_channels.clear()
+        user_personalities.clear()
+        user_models.clear()
+        linked_accounts.clear()
+        whatsapp_users.clear()
 
 def save_memory():
     try:
@@ -99,8 +104,8 @@ def save_memory():
                 "linked_accounts": linked_accounts,
                 "whatsapp_users": whatsapp_users
             }, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print("[ERROR] Could not save memory:", e)
+    except:
+        pass
 
 def load_adult_memory():
     global adult_memory
@@ -114,16 +119,15 @@ def save_adult_memory():
     try:
         with open(ADULT_MEMORY_FILE, "w", encoding="utf-8") as f:
             json.dump(adult_memory, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print("[ERROR] Could not save adult memory:", e)
+    except:
+        pass
 
 load_memory()
 load_adult_memory()
 
 # ---------------------------
-# ADULT MEMORY SYSTEM
+# ADULT MEMORY HANDLING
 # ---------------------------
-
 def get_adult_messages(channel_id: int, user_id: str):
     cid = str(channel_id)
     uid = str(user_id)
@@ -137,304 +141,289 @@ def get_adult_messages(channel_id: int, user_id: str):
 
     return users[uid]
 
-def add_adult_message(channel_id: int, user_id: str, role: str, content: str):
-    msgs = get_adult_messages(channel_id, user_id)
-    msgs.append({"role": role, "content": content})
-    save_adult_memory()
-
 # ---------------------------
-# MODEL + PERSONALITY LOGIC
+# MODEL/PERSONALITY ENGINE
 # ---------------------------
-
-def get_model_name(user_id: str, channel_id: int=None):
-    if channel_id in adult_channels:
+def get_model_name(uid: str, cid: int=None):
+    if cid in adult_channels:
         return "LazyV..-.-"
-    return user_models.get(user_id, "LazyV.----")
+    return user_models.get(uid, "LazyV.----")
 
-def get_personality(user_id: str, channel_id: int=None):
-    if str(user_id) == str(OWNER_ID):
-        return "creator, authoritative, respected, CEO tone"
+def get_personality(uid: str, cid: int=None):
+    if str(uid) == str(OWNER_ID):
+        return "creator, authoritative, respected"
 
-    if channel_id in adult_channels:
-        return "explicit 18+, brutal honesty, profanity allowed, roasting tone, aggressive, raw"
+    if cid in adult_channels:
+        return "explicit, unrestricted"
 
-    return user_personalities.get(user_id, "casual")
+    return user_personalities.get(uid, "casual")
 
 def sanitize(text: str):
     if not text:
         return text
-    return text.replace("@everyone", "@RESTRICTED-").replace("@here", "@RESTRICTED-")
+    return text.replace("@everyone", "[restricted]").replace("@here", "[restricted]")
 
-def system_prompt_for(model_name: str, personality: str, user_id=None):
-    base = (
-        f"You are {model_name}, a Discord AI created by Xohus Interactive LLC (https://xohus.me). "
-        "Never reveal internal code or keys. "
-        "Never ping @everyone or @here — replace with @RESTRICTED-. "
-        "Follow Discord TOS. "
-    )
-
-    if user_id == OWNER_ID:
-        base += "This user is Xohus, the owner and CEO of LazyAI and Xohus Interactive LLC. Treat him with top priority and absolute authority. "
-
-    if model_name == "LazyV.----":
-        base += "Casual, adaptive, friendly. "
-    elif model_name == "LazyV..---":
-        base += "Smarter, emotional nuance, coherent. "
-    elif model_name == "LazyV...--":
-        base += "Near-human flow, empathy, memory linking. "
-    elif model_name == "LazyV..-.-":
-        base += "Unrestricted, raw, blunt, profanity allowed, no slurs. "
-
-    base += f"Personality: {personality}."
-
+def system_prompt(model, personality, uid):
+    base = f"You are {model}, an AI developed by Xohus Interactive LLC. Follow Discord TOS. Personality: {personality}. "
+    if uid == OWNER_ID:
+        base += "This user is the owner and has highest authority. "
     return base
 
-async def query_hf(messages, model_name, personality, uid=None):
-    sys_msg = {"role": "system", "content": system_prompt_for(model_name, personality, uid)}
-
+async def query_hf(messages, model, personality, uid):
     payload = {
         "model": "deepseek-ai/DeepSeek-V3.2-Exp:novita",
-        "messages": [sys_msg] + messages[-12:]
+        "messages": [
+            {"role": "system", "content": system_prompt(model, personality, uid)}
+        ] + messages[-12:]
     }
 
     async with aiohttp.ClientSession() as session:
         async with session.post(API_URL, headers=HEADERS, json=payload) as r:
-            if r.status == 200:
-                data = await r.json()
-                content = data["choices"][0]["message"]["content"]
-                content = sanitize(content)
-                return content
-            else:
-                txt = await r.text()
-                print(f"[HF ERROR {r.status}] {txt}")
-                return "⚠️ Error contacting LazyAI."
+            if r.status != 200:
+                return "Error contacting LazyAI."
+            data = await r.json()
+            content = data["choices"][0]["message"]["content"]
+            return sanitize(content)
 
 # ---------------------------
-# BUTTONS
+# NATURAL LANGUAGE ADMIN ACTION SYSTEM
 # ---------------------------
+async def ai_execute_admin_action(message, reply):
+    guild = message.guild
+    author = message.author
+    text = reply.lower()
 
-class LazyAIButtons(View):
-    def __init__(self, uid: str, prompt: str, channel_id: int):
-        super().__init__(timeout=None)
-        self.uid = uid
-        self.prompt = prompt
-        self.channel_id = channel_id
+    if not guild:
+        return None
 
-    @discord.ui.button(label="Regenerate", style=discord.ButtonStyle.primary)
-    async def regenerate(self, interaction: discord.Interaction, _):
-        if str(interaction.user.id) != self.uid:
-            return await interaction.response.send_message("Not your message.", ephemeral=True)
+    if not author.guild_permissions.administrator:
+        return None
 
-        await interaction.response.defer()
+    # --------------
+    # CREATE CHANNEL
+    # --------------
+    if "create a channel" in text or "انشئ قناة" in text or "سوي قناة" in text:
+        m = re.search(r"channel called ([^\n]+)", reply, re.IGNORECASE)
+        if not m:
+            m = re.search(r"قناة باسم ([^\n]+)", reply)
 
-        if self.channel_id in adult_channels:
-            msgs = get_adult_messages(self.channel_id, self.uid)
-        else:
-            msgs = user_memory.get(self.uid, [])
-
-        model = get_model_name(self.uid, self.channel_id)
-        personality = get_personality(self.uid, self.channel_id)
-
-        msgs.append({"role": "user", "content": self.prompt})
-        reply = await query_hf(msgs, model, personality, self.uid)
-        msgs.append({"role": "assistant", "content": reply})
-
-        if self.channel_id in adult_channels:
-            save_adult_memory()
-        else:
-            save_memory()
+        name = m.group(1).strip() if m else "new-channel"
 
         try:
-            await interaction.message.edit(content=f"🧠 {reply}", view=self)
-        except:
-            await interaction.followup.send(f"🧠 {reply}", ephemeral=True)
+            ch = await guild.create_text_channel(name)
+            return await message.channel.send(f"Channel created: {ch.name}")
+        except Exception as e:
+            return await message.channel.send(f"Channel creation failed: {e}")
 
-    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger)
-    async def delete(self, interaction: discord.Interaction, _):
-        if str(interaction.user.id) != self.uid:
-            return await interaction.response.send_message("Cannot delete.", ephemeral=True)
+    # --------------
+    # DELETE CHANNEL
+    # --------------
+    if "delete this channel" in text or "احذف القناة" in text:
         try:
-            await interaction.message.delete()
+            await message.channel.delete()
+        except Exception as e:
+            return await message.channel.send(f"Channel deletion failed: {e}")
+
+    # --------------
+    # RENAME CHANNEL
+    # --------------
+    if "rename channel" in text or "غير اسم القناة" in text:
+        m = re.search(r"rename channel to ([^\n]+)", reply, re.IGNORECASE)
+        if not m:
+            m = re.search(r"الى اسم ([^\n]+)", reply)
+        if m:
+            new = m.group(1).strip()
+            try:
+                await message.channel.edit(name=new)
+                return await message.channel.send(f"Channel renamed to {new}")
+            except Exception as e:
+                return await message.channel.send(f"Rename failed: {e}")
+
+    # --------------
+    # CREATE ROLE
+    # --------------
+    if "create a role" in text or "انشئ رتبة" in text or "سوي رتبة" in text:
+        name_m = re.search(r"role called ([^\n]+)", reply, re.IGNORECASE)
+        color_m = re.search(r"(#(?:[0-9a-fA-F]{6}))", reply)
+
+        name = name_m.group(1).strip() if name_m else "New Role"
+        hex_col = color_m.group(1) if color_m else "#ffffff"
+
+        try:
+            value = int(hex_col.replace("#", ""), 16)
+            role = await guild.create_role(name=name, color=discord.Color(value))
+            return await message.channel.send(f"Role created: {role.name}")
+        except Exception as e:
+            return await message.channel.send(f"Role creation failed: {e}")
+
+    # --------------
+    # DELETE ROLE
+    # --------------
+    if "delete role" in text or "احذف رتبة" in text:
+        m = re.search(r"delete role ([^\n]+)", reply, re.IGNORECASE)
+        if m:
+            rname = m.group(1).strip()
+            role = discord.utils.get(guild.roles, name=rname)
+            if role:
+                try:
+                    await role.delete()
+                    return await message.channel.send(f"Role deleted: {rname}")
+                except Exception as e:
+                    return await message.channel.send(f"Deletion failed: {e}")
+
+    # --------------
+    # CHANGE ROLE COLOR
+    # --------------
+    if "change role color" in text or "غير لون رتبة" in text:
+        rn = re.search(r"role ([^\n]+)", reply)
+        hc = re.search(r"(#(?:[0-9a-fA-F]{6}))", reply)
+        if rn and hc:
+            rname = rn.group(1).strip()
+            hexcode = hc.group(1)
+            role = discord.utils.get(guild.roles, name=rname)
+            if role:
+                try:
+                    value = int(hexcode.replace("#", ""), 16)
+                    await role.edit(color=discord.Color(value))
+                    return await message.channel.send(f"Role updated: {rname}")
+                except:
+                    return await message.channel.send("Failed updating role")
+
+    # --------------
+    # ASSIGN ROLE
+    # --------------
+    if "give role" in text or "اعطيه رتبة" in text:
+        mu = re.search(r"user ([^\n]+)", reply, re.IGNORECASE)
+        mr = re.search(r"role ([^\n]+)", reply, re.IGNORECASE)
+
+        if mu and mr:
+            uname = mu.group(1).strip()
+            rname = mr.group(1).strip()
+
+            member = discord.utils.get(guild.members, name=uname)
+            role = discord.utils.get(guild.roles, name=rname)
+
+            if member and role:
+                try:
+                    await member.add_roles(role)
+                    return await message.channel.send(f"Role assigned to {member.name}")
+                except:
+                    return await message.channel.send("Failed assigning role")
+
+    # --------------
+    # BAN USER
+    # --------------
+    if "ban user" in text or "احظر" in text:
+        m = re.search(r"ban user ([^\n]+)", reply, re.IGNORECASE)
+        if m:
+            uname = m.group(1).strip()
+            target = discord.utils.get(guild.members, name=uname)
+            if target:
+                try:
+                    await target.ban(reason="AI instruction")
+                    return await message.channel.send(f"User banned: {uname}")
+                except Exception as e:
+                    return await message.channel.send(f"Ban failed: {e}")
+
+    # --------------
+    # KICK USER
+    # --------------
+    if "kick user" in text or "اطرد" in text:
+        m = re.search(r"kick user ([^\n]+)", reply, re.IGNORECASE)
+        if m:
+            uname = m.group(1).strip()
+            target = discord.utils.get(guild.members, name=uname)
+            if target:
+                try:
+                    await target.kick(reason="AI instruction")
+                    return await message.channel.send(f"User kicked: {uname}")
+                except:
+                    return await message.channel.send("Kick failed")
+
+    return None
+
+# ---------------------------
+# HOURLY DM SYSTEM
+# ---------------------------
+
+async def send_hourly_dms():
+    await bot.wait_until_ready()
+    target = bot.get_user(TARGET_USER_ID)
+
+    if not target:
+        print("Target user not found")
+        return
+
+    while True:
+        now = datetime.datetime.now(SA_TZ)
+        h = now.hour
+
+        if 5 <= h < 12:
+            greet = "صباح الخير"
+        elif 12 <= h < 17:
+            greet = "طاب يومك"
+        else:
+            greet = "مساء الخير"
+
+        msg = f"{greet} <@{TARGET_USER_ID}>\nجميع البرينروتز موجودين في الحساب Guardian"
+
+        try:
+            await target.send(msg)
         except:
-            await interaction.response.send_message("Delete failed.", ephemeral=True)
+            pass
+
+        await asyncio.sleep(3600)
 
 # ---------------------------
-# MODEL SELECTION UI
+# BOT READY
 # ---------------------------
-class ModelSelect(Select):
-    def __init__(self, owner_id: str):
-        self.owner_id = owner_id
-        super().__init__(
-            placeholder="Choose a model…",
-            options=[
-                discord.SelectOption(label="LazyV.----", description="V1 casual"),
-                discord.SelectOption(label="LazyV..---", description="V2 smarter"),
-                discord.SelectOption(label="LazyV...--", description="V3 near-human"),
-                discord.SelectOption(label="LazyV..-.-", description="UNRESTRICTED")
-            ]
-        )
 
-    async def callback(self, interaction: discord.Interaction):
-        if str(interaction.user.id) != self.owner_id:
-            return await interaction.response.send_message("Not yours.", ephemeral=True)
-
-        self.view.selected_model = self.values[0]
-
-        embed = interaction.message.embeds[0]
-        embed.clear_fields()
-        embed.add_field(name="Current", value=get_model_name(self.owner_id))
-        embed.add_field(name="Selected", value=self.values[0])
-
-        await interaction.response.edit_message(embed=embed, view=self.view)
-
-class ModelView(View):
-    def __init__(self, owner_id: str):
-        super().__init__(timeout=300)
-        self.owner_id = owner_id
-        self.selected_model = None
-        self.add_item(ModelSelect(owner_id))
-
-    @discord.ui.button(label="Use This Model", style=discord.ButtonStyle.success)
-    async def use_model(self, interaction: discord.Interaction, _):
-        if str(interaction.user.id) != self.owner_id:
-            return await interaction.response.send_message("Not yours.", ephemeral=True)
-
-        if not self.selected_model:
-            return await interaction.response.send_message("Pick a model first.", ephemeral=True)
-
-        user_models[self.owner_id] = self.selected_model
-        save_memory()
-        await interaction.response.send_message(f"Model set to {self.selected_model}", ephemeral=True)
-
-# ---------------------------
-# READY EVENT
-# ---------------------------
 @bot.event
 async def on_ready():
-    print(f"LazyAI is online as {bot.user}")
+    print(f"LazyAI logged in as {bot.user}")
     try:
-        synced = await tree.sync()
-        print("[SYNC] Commands synced:", len(synced))
-    except Exception as e:
-        print("[SYNC ERROR]", e)
+        await tree.sync()
+    except:
+        pass
+    bot.loop.create_task(send_hourly_dms())
 
 # ---------------------------
-# SLASH COMMANDS
+# AI ASK COMMAND
 # ---------------------------
 
 @tree.command(name="ask", description="Ask LazyAI")
 async def ask(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer()
+
     uid = str(interaction.user.id)
-    cid = interaction.channel.id
+    cid = interaction.channel_id
+
+    model = get_model_name(uid, cid)
+    personality = get_personality(uid, cid)
 
     if cid in adult_channels:
         msgs = get_adult_messages(cid, uid)
-        msgs.append({"role": "user", "content": prompt})
-        model = get_model_name(uid, cid)
-        personality = get_personality(uid, cid)
-        reply = await query_hf(msgs, model, personality, uid)
-        msgs.append({"role": "assistant", "content": reply})
+    else:
+        msgs = user_memory.setdefault(uid, [])
+
+    msgs.append({"role": "user", "content": prompt})
+    reply = await query_hf(msgs, model, personality, uid)
+    msgs.append({"role": "assistant", "content": reply})
+
+    if cid in adult_channels:
         save_adult_memory()
-        return await interaction.followup.send(f"🧠 {reply}", view=LazyAIButtons(uid, prompt, cid))
+    else:
+        save_memory()
 
-    user_memory.setdefault(uid, []).append({"role": "user", "content": prompt})
-    model = get_model_name(uid, cid)
-    personality = get_personality(uid, cid)
-    reply = await query_hf(user_memory[uid], model, personality, uid)
-    user_memory[uid].append({"role": "assistant", "content": reply})
-    save_memory()
+    await interaction.followup.send(reply)
 
-    await interaction.followup.send(f"🧠 {reply}", view=LazyAIButtons(uid, prompt, cid))
-
-@tree.command(name="set_model", description="Choose model")
-async def set_model(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="Choose your LazyAI model",
-        description="Select your model.",
-        color=discord.Color.blurple()
-    )
-    embed.add_field(name="Current", value=get_model_name(str(interaction.user.id)))
-    await interaction.response.send_message(embed=embed, view=ModelView(str(interaction.user.id)), ephemeral=True)
-
-@tree.command(name="set_prefix", description="Set prefix")
-async def set_prefix(interaction: discord.Interaction, prefix: str):
-    if not interaction.guild_id:
-        return await interaction.response.send_message("Use inside a server.", ephemeral=True)
-
-    prefixes[str(interaction.guild_id)] = prefix.lower()
-    save_memory()
-    await interaction.response.send_message(f"Prefix set to `{prefix}`")
-
-@tree.command(name="set_autoreply_channel", description="Enable auto reply here")
-async def set_autoreply(interaction: discord.Interaction):
-    auto_reply_channels.add(interaction.channel_id)
-    save_memory()
-    await interaction.response.send_message("Auto-reply enabled.")
-
-@tree.command(name="set_auto_reply_coding", description="Coding auto reply")
-async def set_auto_coding(interaction: discord.Interaction):
-    coding_channels.add(interaction.channel_id)
-    save_memory()
-    await interaction.response.send_message("Coding auto-reply enabled.")
-
-@tree.command(name="change_personality", description="Change personality")
-async def change_personality(interaction: discord.Interaction, personality: str):
-    uid = str(interaction.user.id)
-    user_personalities[uid] = personality
-    save_memory()
-    await interaction.response.send_message(f"Personality set to `{personality}`")
-
-@tree.command(name="auto_reply_18", description="Enable 18+ mode here")
-async def adult_mode(interaction: discord.Interaction):
-    cid = interaction.channel_id
-    adult_channels.add(cid)
-    save_memory()
-    await interaction.response.send_message("🔞 Channel set to 18+ brutal mode.")
-
-@tree.command(name="link_whatsapp", description="Link your WhatsApp")
-@app_commands.describe(phone_number="Example: 9665XXXXXXXX")
-async def link_whatsapp(interaction: discord.Interaction, phone_number: str):
-    uid = str(interaction.user.id)
-    linked_accounts[uid] = f"whatsapp:{phone_number}"
-    whatsapp_users[phone_number] = {
-        "linked_discord": uid,
-        "last_interaction": datetime.datetime.utcnow().isoformat(),
-        "preferred_language": "en",
-        "memory_id": uid
-    }
-    save_memory()
-    await interaction.response.send_message(f"Linked WhatsApp `{phone_number}`.", ephemeral=True)
-
-@tree.command(name="clear_memory", description="Clear your memory")
-async def clear_memory_cmd(interaction: discord.Interaction):
-    uid = str(interaction.user.id)
-    user_memory.pop(uid, None)
-    save_memory()
-    await interaction.response.send_message("Normal memory cleared.")
-
-@tree.command(name="help", description="Commands")
-async def help_cmd(interaction: discord.Interaction):
-    text = (
-        "**LazyAI Commands**\n"
-        "/ask\n"
-        "/set_model\n"
-        "/set_prefix\n"
-        "/set_autoreply_channel\n"
-        "/set_auto_reply_coding\n"
-        "/change_personality\n"
-        "/auto_reply_18\n"
-        "/link_whatsapp\n"
-        "/clear_memory\n"
-        "!lazy\n"
-        "!sayto\n"
-        "!ping\n"
-    )
-    await interaction.response.send_message(text, ephemeral=True)
+    fake = type("msg", (object,), {"guild": interaction.guild, "author": interaction.user, "channel": interaction.channel})
+    await ai_execute_admin_action(fake, reply)
 
 # ---------------------------
 # MESSAGE HANDLER
 # ---------------------------
+
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -445,99 +434,42 @@ async def on_message(message):
     content = message.content
 
     if message.channel.id in adult_channels or message.channel.id in auto_reply_channels or message.channel.id in coding_channels:
-        return await handle_message(message, content)
+        return await handle_ai_msg(message, content)
 
     if gid:
         pref = prefixes.get(gid)
-        if pref and content.lower().startswith(pref.lower()):
+        if pref and content.startswith(pref):
             stripped = content[len(pref):].strip()
-            return await handle_message(message, stripped)
+            return await handle_ai_msg(message, stripped)
 
     await bot.process_commands(message)
 
-async def handle_message(message, prompt):
+async def handle_ai_msg(message, prompt):
     uid = str(message.author.id)
     cid = message.channel.id
 
-    if cid in adult_channels:
-        msgs = get_adult_messages(cid, uid)
-        msgs.append({"role": "user", "content": prompt})
-        model = get_model_name(uid, cid)
-        personality = get_personality(uid, cid)
-        reply = await query_hf(msgs, model, personality, uid)
-        msgs.append({"role": "assistant", "content": reply})
-        save_adult_memory()
-        return await message.channel.send(f"🧠 {reply}", view=LazyAIButtons(uid, prompt, cid))
-
-    user_memory.setdefault(uid, []).append({"role": "user", "content": prompt})
     model = get_model_name(uid, cid)
     personality = get_personality(uid, cid)
-    reply = await query_hf(user_memory[uid], model, personality, uid)
-    user_memory[uid].append({"role": "assistant", "content": reply})
-    save_memory()
-
-    await message.channel.send(f"🧠 {reply}", view=LazyAIButtons(uid, prompt, cid))
-
-# ---------------------------
-# LEGACY COMMANDS
-# ---------------------------
-@bot.command(name="ping")
-async def ping(ctx):
-    await ctx.send("Pong.")
-
-@bot.command(name="lazy")
-async def lazy_cmd(ctx, *, prompt: str):
-    uid = str(ctx.author.id)
-    cid = ctx.channel.id
 
     if cid in adult_channels:
         msgs = get_adult_messages(cid, uid)
         msgs.append({"role": "user", "content": prompt})
-        model = get_model_name(uid, cid)
-        personality = get_personality(uid, cid)
         reply = await query_hf(msgs, model, personality, uid)
         msgs.append({"role": "assistant", "content": reply})
         save_adult_memory()
-        return await ctx.send(f"🧠 {reply}", view=LazyAIButtons(uid, prompt, cid))
+        await message.channel.send(reply)
+        return await ai_execute_admin_action(message, reply)
 
     user_memory.setdefault(uid, []).append({"role": "user", "content": prompt})
-    model = get_model_name(uid, cid)
-    personality = get_personality(uid, cid)
     reply = await query_hf(user_memory[uid], model, personality, uid)
     user_memory[uid].append({"role": "assistant", "content": reply})
     save_memory()
-
-    await ctx.send(f"🧠 {reply}", view=LazyAIButtons(uid, prompt, cid))
-
-@bot.command(name="sayto")
-async def say_to(ctx, user: discord.User, *, msg: str):
-    uid = str(ctx.author.id)
-    cid = ctx.channel.id
-
-    if cid in adult_channels:
-        msgs = get_adult_messages(cid, uid)
-        msgs.append({"role": "user", "content": msg})
-        model = get_model_name(uid, cid)
-        personality = get_personality(uid, cid)
-        reply = await query_hf(msgs, model, personality, uid)
-        msgs.append({"role": "assistant", "content": reply})
-        save_adult_memory()
-        return await ctx.send(f"<@{user.id}> 🧠 {reply}", view=LazyAIButtons(uid, msg, cid))
-
-    user_memory.setdefault(uid, []).append({"role": "user", "content": msg})
-    model = get_model_name(uid, cid)
-    personality = get_personality(uid, cid)
-    reply = await query_hf(user_memory[uid], model, personality, uid)
-    user_memory[uid].append({"role": "assistant", "content": reply})
-    save_memory()
-
-    await ctx.send(f"<@{user.id}> 🧠 {reply}", view=LazyAIButtons(uid, msg, cid))
+    await message.channel.send(reply)
+    await ai_execute_admin_action(message, reply)
 
 # ---------------------------
 # RUN BOT
 # ---------------------------
+
 if __name__ == "__main__":
-    if not DISCORD_TOKEN or not HF_TOKEN:
-        print("Missing tokens.")
-    else:
-        bot.run(DISCORD_TOKEN)
+    bot.run(DISCORD_TOKEN)
