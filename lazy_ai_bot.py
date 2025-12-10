@@ -7,9 +7,9 @@ import json
 import aiohttp
 import datetime
 import asyncio
-import pytz
 import re
 import discord
+from zoneinfo import ZoneInfo
 from discord.ext import commands
 from discord import app_commands
 from discord.ui import View, Select
@@ -30,7 +30,7 @@ ADULT_MEMORY_FILE = "18mem.json"
 OWNER_ID = 1012774928841445426
 TARGET_USER_ID = 1382832842446340157
 
-SA_TZ = pytz.timezone("Asia/Riyadh")
+SA_TZ = ZoneInfo("Asia/Riyadh")
 
 # ---------------------------
 # DISCORD CLIENT
@@ -58,7 +58,7 @@ linked_accounts = {}
 whatsapp_users = {}
 
 # ---------------------------
-# MEMORY LOAD/SAVE
+# LOAD MEMORY
 # ---------------------------
 def load_memory():
     global user_memory, prefixes, auto_reply_channels, coding_channels
@@ -126,11 +126,11 @@ load_memory()
 load_adult_memory()
 
 # ---------------------------
-# ADULT MEMORY HANDLING
+# ADULT MEMORY SYSTEM
 # ---------------------------
-def get_adult_messages(channel_id: int, user_id: str):
-    cid = str(channel_id)
-    uid = str(user_id)
+def get_adult_messages(cid: int, uid: str):
+    cid = str(cid)
+    uid = str(uid)
 
     if cid not in adult_memory["channels"]:
         adult_memory["channels"][cid] = {"users": {}}
@@ -142,7 +142,7 @@ def get_adult_messages(channel_id: int, user_id: str):
     return users[uid]
 
 # ---------------------------
-# MODEL/PERSONALITY ENGINE
+# MODEL / PERSONALITY
 # ---------------------------
 def get_model_name(uid: str, cid: int=None):
     if cid in adult_channels:
@@ -154,79 +154,72 @@ def get_personality(uid: str, cid: int=None):
         return "creator, authoritative, respected"
 
     if cid in adult_channels:
-        return "explicit, unrestricted"
+        return "explicit, aggressive"
 
     return user_personalities.get(uid, "casual")
 
-def sanitize(text: str):
-    if not text:
-        return text
-    return text.replace("@everyone", "[restricted]").replace("@here", "[restricted]")
+def sanitize(txt):
+    if not txt:
+        return txt
+    return txt.replace("@everyone", "[restricted]").replace("@here", "[restricted]")
 
 def system_prompt(model, personality, uid):
-    base = f"You are {model}, an AI developed by Xohus Interactive LLC. Follow Discord TOS. Personality: {personality}. "
+    base = f"You are {model}, an AI created by Xohus Interactive LLC. Follow Discord TOS. Personality: {personality}. "
     if uid == OWNER_ID:
-        base += "This user is the owner and has highest authority. "
+        base += "This user is the owner and must be prioritized. "
     return base
 
-async def query_hf(messages, model, personality, uid):
+async def query_hf(msgs, model, personality, uid):
     payload = {
         "model": "deepseek-ai/DeepSeek-V3.2-Exp:novita",
         "messages": [
             {"role": "system", "content": system_prompt(model, personality, uid)}
-        ] + messages[-12:]
+        ] + msgs[-12:]
     }
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(API_URL, headers=HEADERS, json=payload) as r:
+    async with aiohttp.ClientSession() as s:
+        async with s.post(API_URL, json=payload, headers=HEADERS) as r:
             if r.status != 200:
-                return "Error contacting LazyAI."
+                return "Error contacting LazyAI"
             data = await r.json()
-            content = data["choices"][0]["message"]["content"]
-            return sanitize(content)
+            return sanitize(data["choices"][0]["message"]["content"])
 
 # ---------------------------
-# NATURAL LANGUAGE ADMIN ACTION SYSTEM
+# AI ACTION PARSER (Admin Only)
 # ---------------------------
-async def ai_execute_admin_action(message, reply):
-    guild = message.guild
-    author = message.author
+async def ai_execute_admin_action(msg, reply):
+    guild = msg.guild
+    author = msg.author
     text = reply.lower()
 
     if not guild:
-        return None
-
+        return
     if not author.guild_permissions.administrator:
-        return None
+        return
 
-    # --------------
     # CREATE CHANNEL
-    # --------------
-    if "create a channel" in text or "انشئ قناة" in text or "سوي قناة" in text:
+    if "create a channel" in text or "سوي قناة" in text or "انشئ قناة" in text:
         m = re.search(r"channel called ([^\n]+)", reply, re.IGNORECASE)
         if not m:
             m = re.search(r"قناة باسم ([^\n]+)", reply)
 
         name = m.group(1).strip() if m else "new-channel"
-
         try:
-            ch = await guild.create_text_channel(name)
-            return await message.channel.send(f"Channel created: {ch.name}")
+            c = await guild.create_text_channel(name)
+            await msg.channel.send(f"Channel created: {c.name}")
         except Exception as e:
-            return await message.channel.send(f"Channel creation failed: {e}")
+            await msg.channel.send(f"Channel creation failed: {e}")
+        return
 
-    # --------------
     # DELETE CHANNEL
-    # --------------
     if "delete this channel" in text or "احذف القناة" in text:
         try:
-            await message.channel.delete()
+            await msg.channel.delete()
         except Exception as e:
-            return await message.channel.send(f"Channel deletion failed: {e}")
+            await msg.channel.send(f"Channel deletion failed: {e}")
+        return
 
-    # --------------
     # RENAME CHANNEL
-    # --------------
     if "rename channel" in text or "غير اسم القناة" in text:
         m = re.search(r"rename channel to ([^\n]+)", reply, re.IGNORECASE)
         if not m:
@@ -234,31 +227,29 @@ async def ai_execute_admin_action(message, reply):
         if m:
             new = m.group(1).strip()
             try:
-                await message.channel.edit(name=new)
-                return await message.channel.send(f"Channel renamed to {new}")
+                await msg.channel.edit(name=new)
+                await msg.channel.send(f"Channel renamed to {new}")
             except Exception as e:
-                return await message.channel.send(f"Rename failed: {e}")
+                await msg.channel.send(f"Rename failed: {e}")
+        return
 
-    # --------------
     # CREATE ROLE
-    # --------------
     if "create a role" in text or "انشئ رتبة" in text or "سوي رتبة" in text:
-        name_m = re.search(r"role called ([^\n]+)", reply, re.IGNORECASE)
-        color_m = re.search(r"(#(?:[0-9a-fA-F]{6}))", reply)
+        nm = re.search(r"role called ([^\n]+)", reply, re.IGNORECASE)
+        cm = re.search(r"(#(?:[0-9a-fA-F]{6}))", reply)
 
-        name = name_m.group(1).strip() if name_m else "New Role"
-        hex_col = color_m.group(1) if color_m else "#ffffff"
+        name = nm.group(1).strip() if nm else "New Role"
+        hexcol = cm.group(1) if cm else "#ffffff"
 
         try:
-            value = int(hex_col.replace("#", ""), 16)
-            role = await guild.create_role(name=name, color=discord.Color(value))
-            return await message.channel.send(f"Role created: {role.name}")
+            val = int(hexcol.replace("#", ""), 16)
+            role = await guild.create_role(name=name, color=discord.Color(val))
+            await msg.channel.send(f"Role created: {role.name}")
         except Exception as e:
-            return await message.channel.send(f"Role creation failed: {e}")
+            await msg.channel.send(f"Role creation failed: {e}")
+        return
 
-    # --------------
     # DELETE ROLE
-    # --------------
     if "delete role" in text or "احذف رتبة" in text:
         m = re.search(r"delete role ([^\n]+)", reply, re.IGNORECASE)
         if m:
@@ -267,38 +258,35 @@ async def ai_execute_admin_action(message, reply):
             if role:
                 try:
                     await role.delete()
-                    return await message.channel.send(f"Role deleted: {rname}")
+                    await msg.channel.send(f"Role deleted: {rname}")
                 except Exception as e:
-                    return await message.channel.send(f"Deletion failed: {e}")
+                    await msg.channel.send(f"Deletion failed: {e}")
+        return
 
-    # --------------
     # CHANGE ROLE COLOR
-    # --------------
     if "change role color" in text or "غير لون رتبة" in text:
         rn = re.search(r"role ([^\n]+)", reply)
         hc = re.search(r"(#(?:[0-9a-fA-F]{6}))", reply)
         if rn and hc:
             rname = rn.group(1).strip()
-            hexcode = hc.group(1)
+            code = hc.group(1)
             role = discord.utils.get(guild.roles, name=rname)
             if role:
                 try:
-                    value = int(hexcode.replace("#", ""), 16)
-                    await role.edit(color=discord.Color(value))
-                    return await message.channel.send(f"Role updated: {rname}")
+                    await role.edit(color=discord.Color(int(code.replace("#", ""), 16)))
+                    await msg.channel.send(f"Role updated: {rname}")
                 except:
-                    return await message.channel.send("Failed updating role")
+                    await msg.channel.send("Failed updating role")
+        return
 
-    # --------------
     # ASSIGN ROLE
-    # --------------
     if "give role" in text or "اعطيه رتبة" in text:
-        mu = re.search(r"user ([^\n]+)", reply, re.IGNORECASE)
-        mr = re.search(r"role ([^\n]+)", reply, re.IGNORECASE)
+        u = re.search(r"user ([^\n]+)", reply, re.IGNORECASE)
+        r = re.search(r"role ([^\n]+)", reply, re.IGNORECASE)
 
-        if mu and mr:
-            uname = mu.group(1).strip()
-            rname = mr.group(1).strip()
+        if u and r:
+            uname = u.group(1).strip()
+            rname = r.group(1).strip()
 
             member = discord.utils.get(guild.members, name=uname)
             role = discord.utils.get(guild.roles, name=rname)
@@ -306,46 +294,42 @@ async def ai_execute_admin_action(message, reply):
             if member and role:
                 try:
                     await member.add_roles(role)
-                    return await message.channel.send(f"Role assigned to {member.name}")
+                    await msg.channel.send(f"Role assigned to {member.name}")
                 except:
-                    return await message.channel.send("Failed assigning role")
+                    await msg.channel.send("Failed assigning role")
+        return
 
-    # --------------
-    # BAN USER
-    # --------------
+    # BAN
     if "ban user" in text or "احظر" in text:
         m = re.search(r"ban user ([^\n]+)", reply, re.IGNORECASE)
         if m:
             uname = m.group(1).strip()
-            target = discord.utils.get(guild.members, name=uname)
-            if target:
+            member = discord.utils.get(guild.members, name=uname)
+            if member:
                 try:
-                    await target.ban(reason="AI instruction")
-                    return await message.channel.send(f"User banned: {uname}")
+                    await member.ban(reason="AI action")
+                    await msg.channel.send(f"User banned: {uname}")
                 except Exception as e:
-                    return await message.channel.send(f"Ban failed: {e}")
+                    await msg.channel.send(f"Ban failed: {e}")
+        return
 
-    # --------------
-    # KICK USER
-    # --------------
+    # KICK
     if "kick user" in text or "اطرد" in text:
         m = re.search(r"kick user ([^\n]+)", reply, re.IGNORECASE)
         if m:
             uname = m.group(1).strip()
-            target = discord.utils.get(guild.members, name=uname)
-            if target:
+            member = discord.utils.get(guild.members, name=uname)
+            if member:
                 try:
-                    await target.kick(reason="AI instruction")
-                    return await message.channel.send(f"User kicked: {uname}")
+                    await member.kick(reason="AI action")
+                    await msg.channel.send(f"User kicked: {uname}")
                 except:
-                    return await message.channel.send("Kick failed")
-
-    return None
+                    await msg.channel.send("Kick failed")
+        return
 
 # ---------------------------
 # HOURLY DM SYSTEM
 # ---------------------------
-
 async def send_hourly_dms():
     await bot.wait_until_ready()
     target = bot.get_user(TARGET_USER_ID)
@@ -377,7 +361,6 @@ async def send_hourly_dms():
 # ---------------------------
 # BOT READY
 # ---------------------------
-
 @bot.event
 async def on_ready():
     print(f"LazyAI logged in as {bot.user}")
@@ -388,13 +371,11 @@ async def on_ready():
     bot.loop.create_task(send_hourly_dms())
 
 # ---------------------------
-# AI ASK COMMAND
+# AI COMMAND
 # ---------------------------
-
 @tree.command(name="ask", description="Ask LazyAI")
 async def ask(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer()
-
     uid = str(interaction.user.id)
     cid = interaction.channel_id
 
@@ -423,7 +404,6 @@ async def ask(interaction: discord.Interaction, prompt: str):
 # ---------------------------
 # MESSAGE HANDLER
 # ---------------------------
-
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -431,20 +411,20 @@ async def on_message(message):
 
     uid = str(message.author.id)
     gid = str(message.guild.id) if message.guild else None
-    content = message.content
+    text = message.content
 
     if message.channel.id in adult_channels or message.channel.id in auto_reply_channels or message.channel.id in coding_channels:
-        return await handle_ai_msg(message, content)
+        return await handle_ai(message, text)
 
     if gid:
         pref = prefixes.get(gid)
-        if pref and content.startswith(pref):
-            stripped = content[len(pref):].strip()
-            return await handle_ai_msg(message, stripped)
+        if pref and text.startswith(pref):
+            stripped = text[len(pref):].strip()
+            return await handle_ai(message, stripped)
 
     await bot.process_commands(message)
 
-async def handle_ai_msg(message, prompt):
+async def handle_ai(message, prompt):
     uid = str(message.author.id)
     cid = message.channel.id
 
@@ -458,7 +438,8 @@ async def handle_ai_msg(message, prompt):
         msgs.append({"role": "assistant", "content": reply})
         save_adult_memory()
         await message.channel.send(reply)
-        return await ai_execute_admin_action(message, reply)
+        await ai_execute_admin_action(message, reply)
+        return
 
     user_memory.setdefault(uid, []).append({"role": "user", "content": prompt})
     reply = await query_hf(user_memory[uid], model, personality, uid)
@@ -470,6 +451,5 @@ async def handle_ai_msg(message, prompt):
 # ---------------------------
 # RUN BOT
 # ---------------------------
-
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
