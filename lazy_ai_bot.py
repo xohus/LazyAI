@@ -243,7 +243,7 @@ payload = {
 “model”: “deepseek-ai/DeepSeek-V3.2-Exp:novita”,
 “messages”: [
 {“role”: “system”, “content”: system_prompt(model, personality, uid)}
-] + msgs[-12:],  # Keep last 12 messages for context
+] + msgs[-12:],
 “max_tokens”: 2000,
 “temperature”: 0.7
 }
@@ -257,7 +257,7 @@ for attempt in range(retries):
                     error_text = await response.text()
                     logger.error(f"API error {response.status}: {error_text}")
                     if attempt < retries - 1:
-                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                        await asyncio.sleep(2 ** attempt)
                         continue
                     return f"Error: API returned status {response.status}"
                 
@@ -807,7 +807,7 @@ await ai_execute_admin_action(ctx.message, reply)
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
 “”“Handle command errors.”””
 if isinstance(error, commands.CommandNotFound):
-return  # Ignore unknown commands
+return
 elif isinstance(error, commands.MissingRequiredArgument):
 await ctx.send(f”Missing required argument: {error.param.name}”)
 elif isinstance(error, commands.BadArgument):
