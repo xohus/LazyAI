@@ -315,7 +315,7 @@ async def send_hourly_dms():
             g = "طاب يومك"
         else:
             g = "مساء الخير"
-        msg = f"{g} <@{TARGET_USER_ID}>\nجميع البرينروتز موجودين في الحساب Guardian"
+        msg = f"{g} <@{TARGET_USER_ID}>\n  جميع البرينروتز موجودين في الحساب alwjswq"ا
         try:
             await u.send(msg)
         except:
