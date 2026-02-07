@@ -1,4 +1,4 @@
-import os, json, aiohttp, discord, asyncio, datetime
+import os, json, aiohttp, discord, asyncio, datetime, io
 from discord.ext import commands
 from discord import app_commands
 from discord.ui import View, Button
@@ -125,6 +125,28 @@ async def query_hf(messages, model, personality):
             data = await r.json()
             return sanitize(data["choices"][0]["message"]["content"])
 
+CODE_HINTS = (
+    "```", "def ", "class ", "function", "const ", "let ", "var ",
+    "#include", "import ", "from ", "{", "}", ";"
+)
+
+def looks_like_code(text):
+    return any(h in text for h in CODE_HINTS)
+
+async def send_reply(channel, reply, view=None):
+    if looks_like_code(reply):
+        file = discord.File(
+            io.BytesIO(reply.encode("utf-8")),
+            filename="response.txt"
+        )
+        await channel.send(
+            "Code output was sent as a file.",
+            file=file,
+            view=view
+        )
+    else:
+        await channel.send(reply, view=view)
+
 class ReplyButtons(View):
     def __init__(self, uid, cid, prompt):
         super().__init__(timeout=None)
@@ -171,7 +193,11 @@ async def handle_prompt(uid, cid, prompt):
 async def ask(interaction, prompt: str):
     await interaction.response.defer()
     reply = await handle_prompt(interaction.user.id, interaction.channel_id, prompt)
-    await interaction.followup.send(reply, view=ReplyButtons(interaction.user.id, interaction.channel_id, prompt))
+    await send_reply(
+        interaction.followup,
+        reply,
+        view=ReplyButtons(interaction.user.id, interaction.channel_id, prompt)
+    )
 
 @tree.command(name="auto-reply-18")
 async def adult(interaction):
@@ -214,12 +240,12 @@ async def on_message(message):
 
     if message.guild is None and str(uid) in dm_autoreply_users:
         reply = await handle_prompt(uid, None, txt)
-        await message.channel.send(reply)
+        await send_reply(message.channel, reply)
         return
 
     if str(cid) in adult_channels or str(cid) in auto_reply_channels or str(cid) in coding_channels:
         reply = await handle_prompt(uid, cid, txt)
-        await message.channel.send(reply, view=ReplyButtons(uid, cid, txt))
+        await send_reply(message.channel, reply, view=ReplyButtons(uid, cid, txt))
         return
 
     await bot.process_commands(message)
