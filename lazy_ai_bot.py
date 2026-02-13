@@ -125,27 +125,51 @@ async def query_hf(messages, model, personality):
             data = await r.json()
             return sanitize(data["choices"][0]["message"]["content"])
 
-CODE_HINTS = (
-    "```", "def ", "class ", "function", "const ", "let ", "var ",
-    "#include", "import ", "from ", "{", "}", ";"
-)
 
-def looks_like_code(text):
-    return any(h in text for h in CODE_HINTS)
+# -------- ADDED FUNCTION --------
 
-async def send_reply(channel, reply, view=None):
-    if looks_like_code(reply):
-        file = discord.File(
-            io.BytesIO(reply.encode("utf-8")),
-            filename="response.txt"
-        )
-        await channel.send(
-            "Code output was sent as a file.",
-            file=file,
-            view=view
-        )
+def extract_code_blocks(text):
+    if "```" not in text:
+        return "", text
+
+    inside = False
+    code_lines = []
+    text_lines = []
+
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            inside = not inside
+            continue
+        if inside:
+            code_lines.append(line)
+        else:
+            text_lines.append(line)
+
+    return "\n".join(code_lines).strip(), "\n".join(text_lines).strip()
+
+
+# -------- MODIFIED send_reply --------
+
+async def send_reply(channel, reply, view=None, dev_mode=False):
+    if dev_mode:
+        code, text_part = extract_code_blocks(reply)
+
+        if text_part:
+            await channel.send(text_part, view=view)
+
+        if code:
+            file = discord.File(
+                io.BytesIO(code.encode("utf-8")),
+                filename="response.txt"
+            )
+            await channel.send(file=file)
+
+        if not code:
+            await channel.send(reply, view=view)
+
     else:
         await channel.send(reply, view=view)
+
 
 class ReplyButtons(View):
     def __init__(self, uid, cid, prompt):
@@ -168,6 +192,7 @@ class ReplyButtons(View):
             return
         await interaction.message.delete()
 
+
 async def handle_prompt(uid, cid, prompt):
     if str(cid) in adult_channels:
         msgs = get_adult_bucket(cid, uid)
@@ -189,6 +214,7 @@ async def handle_prompt(uid, cid, prompt):
 
     return reply
 
+
 @tree.command(name="ask")
 async def ask(interaction, prompt: str):
     await interaction.response.defer()
@@ -199,11 +225,13 @@ async def ask(interaction, prompt: str):
         view=ReplyButtons(interaction.user.id, interaction.channel_id, prompt)
     )
 
+
 @tree.command(name="auto-reply-18")
 async def adult(interaction):
     adult_channels.add(str(interaction.channel_id))
     save_memory()
     await interaction.response.send_message("18+ mode enabled.")
+
 
 @tree.command(name="set-autoreply-channel")
 async def auto(interaction):
@@ -211,11 +239,13 @@ async def auto(interaction):
     save_memory()
     await interaction.response.send_message("Auto reply enabled.")
 
+
 @tree.command(name="set-auto-reply-coding")
 async def code(interaction):
     coding_channels.add(str(interaction.channel_id))
     save_memory()
     await interaction.response.send_message("Coding mode enabled.")
+
 
 @tree.command(name="set-auto-reply-dms")
 async def dms(interaction):
@@ -223,11 +253,13 @@ async def dms(interaction):
     save_memory()
     await interaction.response.send_message("DM auto reply enabled.")
 
+
 @tree.command(name="clear-memory")
 async def clear(interaction):
     user_memory[str(interaction.user.id)] = []
     save_memory()
     await interaction.response.send_message("Memory cleared.")
+
 
 @bot.event
 async def on_message(message):
@@ -243,12 +275,18 @@ async def on_message(message):
         await send_reply(message.channel, reply)
         return
 
-    if str(cid) in adult_channels or str(cid) in auto_reply_channels or str(cid) in coding_channels:
+    if str(cid) in coding_channels:
+        reply = await handle_prompt(uid, cid, txt)
+        await send_reply(message.channel, reply, view=ReplyButtons(uid, cid, txt), dev_mode=True)
+        return
+
+    if str(cid) in adult_channels or str(cid) in auto_reply_channels:
         reply = await handle_prompt(uid, cid, txt)
         await send_reply(message.channel, reply, view=ReplyButtons(uid, cid, txt))
         return
 
     await bot.process_commands(message)
+
 
 @bot.event
 async def on_ready():
