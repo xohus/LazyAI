@@ -1,22 +1,3 @@
-“””
-LazyAI Discord Bot — Improved
-Xohus Interactive LLC (https://xohus.me)
-
-Improvements over original:
-
-- Structured logging instead of bare print()
-- Permission guards on all admin slash commands
-- Rate limiting per user to prevent API spam
-- Graceful error handling on API failures
-- Message chunking for responses > 2000 chars
-- /remove-* commands to undo channel/DM modes
-- /memory-info to show how many messages are stored
-- Async file I/O via asyncio.to_thread (non-blocking saves)
-- Constants for magic strings / numbers
-- Type annotations throughout
-- Removed dead code / tightened logic
-  “””
-
 import asyncio
 import io
 import json
