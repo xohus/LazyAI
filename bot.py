@@ -1,7 +1,6 @@
-import os, json, aiohttp, discord, asyncio, datetime, io
+import os, json, aiohttp, discord, io, logging
 from discord.ext import commands
-from discord import app_commands
-from discord.ui import View, Button
+from discord.ui import View
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,6 +21,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
+logging.basicConfig(level=logging.INFO)
 
 user_memory = {}
 adult_memory = {"channels": {}}
@@ -39,7 +39,8 @@ def load_json(path, default):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        logging.warning("Could not load %s: %s", path, exc)
         return default
 
 def save_json(path, data):
@@ -79,6 +80,27 @@ load_adult_memory()
 def sanitize(text):
     return text.replace("@everyone", "@-everyone").replace("@here", "@-here")
 
+def split_discord_text(text, limit=1900):
+    text = sanitize(text or "")
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    while text:
+        chunk = text[:limit]
+        split_at = max(chunk.rfind("\n"), chunk.rfind(" "))
+        if split_at < limit * 0.6:
+            split_at = limit
+        chunks.append(text[:split_at].strip())
+        text = text[split_at:].strip()
+    return [chunk for chunk in chunks if chunk]
+
+def pop_last_exchange(messages, prompt):
+    if messages and messages[-1].get("role") == "assistant":
+        messages.pop()
+    if messages and messages[-1].get("role") == "user" and messages[-1].get("content") == prompt:
+        messages.pop()
+
 def get_adult_bucket(channel_id, user_id):
     c = adult_memory["channels"].setdefault(str(channel_id), {})
     u = c.setdefault("users", {}).setdefault(str(user_id), [])
@@ -115,6 +137,9 @@ def system_prompt(model, personality):
     )
 
 async def query_hf(messages, model, personality):
+    if not HF_TOKEN:
+        return "LazyAI is missing HF_TOKEN."
+
     payload = {
         "model": HF_MODEL,
         "messages": [{"role": "system", "content": system_prompt(model, personality)}] + messages[-12:]
@@ -122,8 +147,15 @@ async def query_hf(messages, model, personality):
 
     async with aiohttp.ClientSession() as s:
         async with s.post(API_URL, headers={"Authorization": f"Bearer {HF_TOKEN}"}, json=payload) as r:
+            if r.status != 200:
+                logging.error("HF API %s: %s", r.status, await r.text())
+                return "LazyAI error. Please try again."
             data = await r.json()
-            return sanitize(data["choices"][0]["message"]["content"])
+            try:
+                return sanitize(data["choices"][0]["message"]["content"])
+            except (KeyError, IndexError, TypeError):
+                logging.exception("Unexpected HF response: %s", data)
+                return "LazyAI error. Please try again."
 
 
 # -------- ADDED FUNCTION --------
@@ -155,20 +187,21 @@ async def send_reply(channel, reply, view=None, dev_mode=False):
         code, text_part = extract_code_blocks(reply)
 
         if text_part:
-            await channel.send(text_part, view=view)
+            chunks = split_discord_text(text_part)
+            for index, chunk in enumerate(chunks):
+                await channel.send(chunk, view=view if index == len(chunks) - 1 and not code else None)
 
         if code:
             file = discord.File(
                 io.BytesIO(code.encode("utf-8")),
                 filename="response.txt"
             )
-            await channel.send(file=file)
-
-        if not code:
-            await channel.send(reply, view=view)
+            await channel.send(file=file, view=view)
 
     else:
-        await channel.send(reply, view=view)
+        chunks = split_discord_text(reply)
+        for index, chunk in enumerate(chunks):
+            await channel.send(chunk, view=view if index == len(chunks) - 1 else None)
 
 
 class ReplyButtons(View):
@@ -183,14 +216,27 @@ class ReplyButtons(View):
         if interaction.user.id != int(self.uid):
             return await interaction.response.send_message("Not yours.", ephemeral=True)
         await interaction.response.defer()
+        if str(self.cid) in adult_channels:
+            pop_last_exchange(get_adult_bucket(self.cid, self.uid), self.prompt)
+        else:
+            pop_last_exchange(user_memory.setdefault(str(self.uid), []), self.prompt)
         reply = await handle_prompt(self.uid, self.cid, self.prompt)
-        await interaction.message.edit(content=reply, view=self)
+        chunks = split_discord_text(reply)
+        await interaction.message.edit(content=chunks[0], attachments=[], view=self)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(chunk)
 
     @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger)
     async def delete(self, interaction, _):
         if interaction.user.id != int(self.uid):
-            return
-        await interaction.message.delete()
+            return await interaction.response.send_message("Not yours.", ephemeral=True)
+        await interaction.response.defer()
+        try:
+            await interaction.message.delete()
+        except discord.Forbidden:
+            await interaction.followup.send("I cannot delete that message here.", ephemeral=True)
+        except discord.HTTPException:
+            await interaction.followup.send("Delete failed. Please try again.", ephemeral=True)
 
 
 async def handle_prompt(uid, cid, prompt):

@@ -4,11 +4,7 @@
       { "role": "user", "content": "Hello" },
       { "role": "assistant", "content": "Hi there!" }
     ],
-    "987654321": [],
-    "whatsapp:966550217001": [
-      { "role": "user", "content": "Hey LazyAI" },
-      { "role": "assistant", "content": "Hey! How’s it going on WhatsApp?" }
-    ]
+    "987654321": []
   },
 
   "prefixes": {
@@ -19,27 +15,5 @@
   "auto_reply_channels": [
     "111111111111111111",
     "222222222222222222"
-  ],
-
-  "linked_accounts": {
-    "123456789": "whatsapp:966550217001",
-    "987654321": "whatsapp:966511122233"
-  },
-
-  "whatsapp_users": {
-    "966550217001": {
-      "linked_discord": "123456789",
-      "name": "Mohammed Zeyad",
-      "last_interaction": "2025-10-15T12:34:56Z",
-      "preferred_language": "en",
-      "memory_id": "123456789"
-    },
-    "966511122233": {
-      "linked_discord": "987654321",
-      "name": "Example User",
-      "last_interaction": "2025-10-15T12:40:00Z",
-      "preferred_language": "en",
-      "memory_id": "987654321"
-    }
-  }
+  ]
 }
